@@ -2,11 +2,11 @@
 
 require 'yaml'
 
-keywords_file = 'podcast_keywords.yml'
-output_dir = '/var/www/html/podcast/files'
-yt_dlp_path = '/home/kdmsnr/.local/bin/yt-dlp'
+config = YAML.load_file('config.yml')
+output_dir = config['audio_dir']
+yt_dlp_path = config['yt_dlp_path']
 
-keywords = YAML.load_file(keywords_file)
+keywords = YAML.load_file('podcast_keywords.yml')
 keywords.each do |keyword|
   command = "#{yt_dlp_path} -x " \
             " -N 5 " \

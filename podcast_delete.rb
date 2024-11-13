@@ -1,9 +1,13 @@
 #!/usr/bin/env ruby
 
+require 'yaml'
 require 'fileutils'
 
+config = YAML.load_file('config.yml')
+directory = config['audio_dir']
+exit unless Dir.exist?(directory)
+
 # 半年以上前のファイルを削除するスクリプト
-directory = '/var/www/html/podcast/files'
 six_months_ago = Time.now - (6 * 30 * 24 * 60 * 60) # 6ヶ月前
 
 Dir.glob("#{directory}/*").each do |file|
@@ -12,4 +16,3 @@ Dir.glob("#{directory}/*").each do |file|
     puts "Deleted: #{file}"
   end
 end
-

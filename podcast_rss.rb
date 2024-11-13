@@ -5,10 +5,12 @@ require 'fileutils'
 require 'cgi'
 require 'time'
 require 'uri'
+require 'yaml'
 
-audio_dir = "/var/www/html/podcast/files"
-output_file = "/var/www/html/podcast/rss.xml"
-base_url = "http://raspberrypi.local/podcast/files/"
+config = YAML.load_file('config.yml')
+audio_dir = config['audio_dir']
+output_file = config['output_file']
+base_url = config['base_url']
 
 def h(text)
   CGI.escapeHTML(text)
@@ -20,9 +22,9 @@ end
 
 rss = RSS::Maker.make("2.0") do |maker|
   maker.encoding = "UTF-8"
-  maker.channel.title = "kdmsnr local podcast"
-  maker.channel.link = "http://raspberrypi.local"
-  maker.channel.description = "Podcast description"
+  maker.channel.title = config['channel_title']
+  maker.channel.link = config['channel_link']
+  maker.channel.description = config['channel_description']
   maker.channel.language = "ja"
 
   files = Dir.glob("#{audio_dir}/*.{mp3,m4a}").sort_by { |file| File.mtime(file) }
@@ -43,4 +45,3 @@ end
 
 File.write(output_file, rss.to_s, encoding: "UTF-8")
 puts "RSS feed generated at #{output_file}"
-
