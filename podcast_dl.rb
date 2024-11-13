@@ -12,7 +12,6 @@ keywords.each do |keyword|
   command = "#{yt_dlp_path} -x " \
             " -N 5 " \
             " --embed-metadata " \
-            " --download-archive archive --break-on-existing --break-per-input" \
             " --playlist-reverse " \
             " -P #{output_dir} " \
             "'https://radiko.jp/#!/search/live?key=#{keyword}&filter=past&area_id=#{area_id}'"
