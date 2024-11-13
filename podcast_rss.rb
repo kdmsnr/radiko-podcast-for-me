@@ -4,8 +4,10 @@ require 'rss'
 require 'fileutils'
 require 'cgi'
 require 'time'
+require 'date'
 require 'uri'
 require 'yaml'
+require 'mini_exiftool'
 
 config = YAML.load_file('config.yml')
 audio_dir = config['audio_dir']
@@ -29,14 +31,16 @@ rss = RSS::Maker.make("2.0") do |maker|
 
   files = Dir.glob("#{audio_dir}/*.{mp3,m4a}").sort_by { |file| File.mtime(file) }
   files.each do |file|
+    exif = MiniExiftool.new(file)
     maker.items.new_item do |item|
       filename = File.basename(file)
-      item.title = h(filename)
-      item.link = "#{base_url}#{u(filename)}"
+      item.link = base_url + u(filename)
+      item.title = h(exif.title + ' - ' + exif.contentcreatedate.to_s)
+      item.description = h(exif.description)
       item.enclosure.url = item.link
-      item.enclosure.length = File.size(file).to_s
+      item.enclosure.length = exif.mediadatasize.to_s
       item.enclosure.type = "audio/mpeg"
-      item.pubDate = File.mtime(file).rfc822
+      item.pubDate = Date.strptime(exif.contentcreatedate.to_s, "%Y%m%d").to_time.utc.rfc822
       item.guid.content = item.link
       item.guid.isPermaLink = true
     end

@@ -6,6 +6,9 @@
 
 ## 使い方
 - [yt-dlp-rajiko](https://github.com/garret1317/yt-dlp-rajiko)とウェブサーバーを用意します（説明省略）
+- [exiftool](https://exiftool.org/)をインストールします
+  - `brew install exiftool` or `sudo apt install exiftool`
+- `bundle install`を実行します
 - config.ymlを設定します
 - podcast_keywords.ymlに録音したいキーワードを記入します
   - 放送局を限定したい場合は`&station_id=XXX`を末尾に追加するとよいです
