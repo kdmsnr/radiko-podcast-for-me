@@ -5,7 +5,7 @@
 - 各スクリプトはcronで実行するとよいでしょう
 
 ## 使い方
-- [yt-dlp-radiko](https://github.com/garret1317/yt-dlp-rajiko)とウェブサーバーを用意します（説明省略）
+- [yt-dlp-rajiko](https://github.com/garret1317/yt-dlp-rajiko)とウェブサーバーを用意します（説明省略）
 - config.ymlを設定します
 - podcast_keywords.ymlに録音したいキーワードを記入します
   - 放送局を限定したい場合は`&station_id=XXX`を末尾に追加するとよいです
