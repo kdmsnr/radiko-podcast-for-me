@@ -1,3 +1,4 @@
+area_id: "JP13"
 audio_dir: "/var/www/html/podcast/files"
 yt_dlp_path: "/home/kdmsnr/.local/bin/yt-dlp"
 output_file: "/var/www/html/podcast/rss.xml"

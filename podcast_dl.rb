@@ -3,6 +3,7 @@
 require 'yaml'
 
 config = YAML.load_file('config.yml')
+area_id = config['area_id']
 output_dir = config['audio_dir']
 yt_dlp_path = config['yt_dlp_path']
 
@@ -14,7 +15,7 @@ keywords.each do |keyword|
             " --download-archive archive --break-on-existing --break-per-input" \
             " --playlist-reverse " \
             " -P #{output_dir} " \
-            "'https://radiko.jp/#!/search/live?key=#{keyword}&filter=past&area_id=JP13'"
+            "'https://radiko.jp/#!/search/live?key=#{keyword}&filter=past&area_id=#{area_id}'"
   puts "Executing: #{command}"
   system(command)
 end
