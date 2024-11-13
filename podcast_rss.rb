@@ -9,7 +9,7 @@ require 'yaml'
 
 config = YAML.load_file('config.yml')
 audio_dir = config['audio_dir']
-output_file = config['output_file']
+output_file = config['rss_file']
 base_url = config['base_url']
 
 def h(text)
