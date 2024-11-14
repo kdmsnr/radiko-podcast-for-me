@@ -39,7 +39,7 @@ rss = RSS::Maker.make("2.0") do |maker|
       item.enclosure.url = item.link
       item.enclosure.length = exif.mediadatasize.to_s
       item.enclosure.type = "audio/mpeg"
-      item.pubDate = exif.filemodifydate.to_time.rfc822
+      item.pubDate = Time.strptime(file_name[/\d{14}/], '%Y%m%d%H%M%S').rfc822 rescue nil
       item.guid.content = item.link
       item.guid.isPermaLink = true
     end
