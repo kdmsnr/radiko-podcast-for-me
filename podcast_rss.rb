@@ -4,7 +4,6 @@ require 'rss'
 require 'fileutils'
 require 'cgi'
 require 'time'
-require 'date'
 require 'uri'
 require 'yaml'
 require 'mini_exiftool'
@@ -40,7 +39,7 @@ rss = RSS::Maker.make("2.0") do |maker|
       item.enclosure.url = item.link
       item.enclosure.length = exif.mediadatasize.to_s
       item.enclosure.type = "audio/mpeg"
-      item.pubDate = Date.strptime(exif.contentcreatedate.to_s, "%Y%m%d").to_time.rfc822
+      item.pubDate = exif.filemodifydate.to_time.rfc822
       item.guid.content = item.link
       item.guid.isPermaLink = true
     end
