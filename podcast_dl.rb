@@ -2,7 +2,7 @@
 
 require 'yaml'
 
-config = YAML.load_file('config.yml')
+config = YAML.load_file(File.join(File.dirname(__FILE__), 'config.yml'))
 area_id = config['area_id']
 output_dir = config['audio_dir']
 yt_dlp_path = config['yt_dlp_path']

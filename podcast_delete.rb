@@ -3,7 +3,7 @@
 require 'yaml'
 require 'fileutils'
 
-config = YAML.load_file('config.yml')
+config = YAML.load_file(File.join(File.dirname(__FILE__), 'config.yml'))
 directory = config['audio_dir']
 exit unless Dir.exist?(directory)
 

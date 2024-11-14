@@ -8,7 +8,7 @@ require 'uri'
 require 'yaml'
 require 'mini_exiftool'
 
-config = YAML.load_file('config.yml')
+config = YAML.load_file(File.join(File.dirname(__FILE__), 'config.yml'))
 audio_dir = config['audio_dir']
 output_file = config['rss_file']
 base_url = config['base_url']
