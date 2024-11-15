@@ -7,7 +7,7 @@ area_id = config['area_id']
 output_dir = config['audio_dir']
 yt_dlp_path = config['yt_dlp_path']
 
-keywords = YAML.load_file('podcast_keywords.yml')
+keywords = YAML.load_file(File.join(File.dirname(__FILE__), 'podcast_keywords.yml'))
 keywords.each do |keyword|
   command = "#{yt_dlp_path} -x " \
             " -N 5 " \
