@@ -28,7 +28,7 @@ rss = RSS::Maker.make("2.0") do |maker|
   maker.channel.description = config['channel_description']
   maker.channel.language = "ja"
 
-  files = Dir.glob("#{audio_dir}/*.{mp3,m4a}").sort_by { |file| File.mtime(file) }
+  files = Dir.glob("#{audio_dir}/*.{mp3,m4a}")
   files.each do |file|
     exif = MiniExiftool.new(file)
     maker.items.new_item do |item|
