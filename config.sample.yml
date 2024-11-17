@@ -6,3 +6,4 @@ base_url: "http://raspberrypi.local/podcast/files/"
 channel_title: "kdmsnr local podcast"
 channel_link: "http://raspberrypi.local"
 channel_description: "Podcast description"
+expire_month: 6
