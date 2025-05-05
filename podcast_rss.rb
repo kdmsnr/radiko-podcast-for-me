@@ -147,11 +147,10 @@ def generate_rss(config)
     puts "INFO: 対象の音声ファイル (#{SUPPORTED_EXTENSIONS.join(', ')}) が見つかりませんでした in #{audio_dir}"
   else
     puts "INFO: #{files.count}個の音声ファイルを処理します..."
-    rss.items.instance_eval do
-      files.each do |file|
-        create_rss_item(rss, file, base_url)
-      end
+    files.each do |file|
+      create_rss_item(rss, file, base_url)
     end
+
     if rss.items.empty? && !files.empty?
         puts "WARN: 音声ファイルは見つかりましたが、有効なRSSアイテムは生成されませんでした。"
     end
