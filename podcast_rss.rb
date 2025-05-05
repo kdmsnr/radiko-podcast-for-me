@@ -46,9 +46,6 @@ def load_config(filepath)
   end
 end
 
-# maker: RSS::Maker オブジェクト
-# file: 音声ファイルのパス
-# base_url: ファイルへのベースURL
 def create_rss_item(maker, file, base_url)
   filename = File.basename(file)
   puts "  処理中: #{filename}"
@@ -93,7 +90,6 @@ def create_rss_item(maker, file, base_url)
   else
     warn "警告: ファイル名 '#{filename}' に日付パターン '#{FILENAME_DATE_PATTERN}' が見つかりません。"
   end
-
   pub_date ||= create_date if create_date.is_a?(Time)
   pub_date ||= File.mtime(file) rescue nil
 
@@ -104,7 +100,6 @@ def create_rss_item(maker, file, base_url)
     item.pubDate = pub_date&.rfc822
     item.guid.content = item_url
     item.guid.isPermaLink = true
-
     item.enclosure.url = item_url
     item.enclosure.length = file_size.to_s
     item.enclosure.type = mime_type(filename)
@@ -130,34 +125,35 @@ def generate_rss(config)
     abort("エラー: 音声ファイルディレクトリが見つかりません: #{audio_dir}")
   end
 
-  rss = RSS::Maker.make("2.0") do |maker|
-    maker.encoding = "UTF-8"
-    maker.channel.title = config['channel_title']
-    maker.channel.link = config['channel_link']
-    maker.channel.description = config['channel_description']
-    maker.channel.language = config.fetch('channel_language', 'ja')
-  end
-
   glob_pattern = File.join(audio_dir, "*")
   files = Dir.glob(glob_pattern).select do |f|
     File.file?(f) && SUPPORTED_EXTENSIONS.include?(File.extname(f).downcase)
   end.sort
 
-  if files.empty?
-    puts "INFO: 対象の音声ファイル (#{SUPPORTED_EXTENSIONS.join(', ')}) が見つかりませんでした in #{audio_dir}"
-  else
-    puts "INFO: #{files.count}個の音声ファイルを処理します..."
-    files.each do |file|
-      create_rss_item(rss, file, base_url)
+  puts "INFO: RSSフィードの生成を開始します..."
+  rss_content = RSS::Maker.make("2.0") do |maker|
+    maker.encoding = "UTF-8"
+    maker.channel.title = config['channel_title']
+    maker.channel.link = config['channel_link']
+    maker.channel.description = config['channel_description']
+    maker.channel.language = config.fetch('channel_language', 'ja')
+
+    if files.empty?
+      puts "INFO: 対象の音声ファイル (#{SUPPORTED_EXTENSIONS.join(', ')}) が見つかりませんでした in #{audio_dir}"
+    else
+      puts "INFO: #{files.count}個の音声ファイルを処理します..."
+      files.each do |file|
+        create_rss_item(maker, file, base_url)
+      end
     end
 
-    if rss.items.empty? && !files.empty?
-        puts "WARN: 音声ファイルは見つかりましたが、有効なRSSアイテムは生成されませんでした。"
+    if maker.items.empty? && !files.empty?
+      warn "WARN: 音声ファイルは見つかりましたが、有効なRSSアイテムは生成されませんでした。"
     end
   end
 
   begin
-    File.write(output_file, rss.to_s, encoding: "UTF-8")
+    File.write(output_file, rss_content.to_s, encoding: "UTF-8")
     puts "RSSフィードを生成しました: #{output_file}"
   rescue => e
     abort("エラー: RSSファイルの書き込みに失敗しました: #{output_file} - #{e.message}")
