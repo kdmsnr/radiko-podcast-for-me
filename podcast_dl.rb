@@ -2,6 +2,7 @@
 
 require 'yaml'
 require 'shellwords'
+require 'uri'
 
 SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
 CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
@@ -32,7 +33,7 @@ def download_podcasts(config, keywords)
   ]
 
   keywords.each do |keyword|
-    search_url = "https://radiko.jp/#!/search/live?key=#{keyword}&filter=past&area_id=#{area_id}"
+    search_url = "https://radiko.jp/#!/search/live?key=#{URI.encode_www_form_component(keyword)}&filter=past&area_id=#{area_id}"
 
     command = [yt_dlp_path] + base_options + [search_url]
     puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
