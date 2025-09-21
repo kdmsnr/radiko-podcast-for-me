@@ -1,59 +1,72 @@
 #!/usr/bin/env ruby
 
-require 'yaml'
 require 'shellwords'
 require 'uri'
+require_relative 'lib/common'
 
-SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
-CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
-KEYWORDS_FILE = File.join(SCRIPT_DIR, 'podcast_keywords.yml')
-
-def load_yaml_file(filepath)
-  begin
-    YAML.load_file(filepath)
-  rescue Errno::ENOENT
-    abort("エラー: ファイルが見つかりません: #{filepath}")
-  rescue Psych::SyntaxError => e
-    abort("エラー: YAMLファイルの形式が正しくありません: #{filepath} - #{e.message}")
+class PodcastDownloader
+  def initialize(config, keywords)
+    @config = config
+    @keywords = keywords
+    validate_config
   end
-end
 
-def download_podcasts(config, keywords)
-  area_id = config['area_id']
-  output_dir = config['audio_dir']
-  yt_dlp_path = config['yt_dlp_path']
-  download_count = config.fetch('download_count', 5)
+  def download
+    base_options = build_base_options
 
-  base_options = [
-    '-x',                      # 音声のみ抽出
-    '-N', download_count.to_s, # ダウンロードする最大数
-    '--embed-metadata',        # メタデータを埋め込む
-    '--playlist-reverse',      # プレイリストを逆順に処理
-    '-P', output_dir,          # 出力ディレクトリ
-  ]
+    @keywords.each do |keyword_str|
+      search_key, station_id = parse_keyword(keyword_str)
+      search_url = build_search_url(search_key, station_id)
+      command = build_command(search_url, base_options)
 
-  keywords.each do |keyword_str|
-    search_key = keyword_str
-    station_id = nil
-
-    if match = keyword_str.match(/(.+)&station_id=(.+)/)
-      search_key = match[1]
-      station_id = match[2]
+      execute_command(command)
     end
+  end
 
+  private
+
+  def validate_config
+    required_keys = %w[area_id audio_dir yt_dlp_path]
+    missing_keys = required_keys.reject { |k| @config[k] }
+    unless missing_keys.empty?
+      abort("エラー: 設定ファイルに必要なキーが不足しています: #{missing_keys.join(', ')}")
+    end
+  end
+
+  def build_base_options
+    [
+      '-x',
+      '-N', @config.fetch('download_count', 5).to_s,
+      '--embed-metadata',
+      '--playlist-reverse',
+      '-P', @config['audio_dir'],
+    ]
+  end
+
+  def parse_keyword(keyword_str)
+    if match = keyword_str.match(/(.+)&station_id=(.+)/)
+      [match[1], match[2]]
+    else
+      [keyword_str, nil]
+    end
+  end
+
+  def build_search_url(search_key, station_id)
     query_params = {
       "key" => search_key,
       "filter" => "past",
-      "area_id" => area_id
+      "area_id" => @config['area_id']
     }
+    query_params["station_id"] = station_id if station_id
 
-    if station_id
-      query_params["station_id"] = station_id
-    end
+    "https://radiko.jp/#!/search/live?" + URI.encode_www_form(query_params)
+  end
 
-    search_url = "https://radiko.jp/#!/search/live?" + URI.encode_www_form(query_params)
+  def build_command(search_url, base_options)
+    [@config['yt_dlp_path']] + base_options + [search_url]
+  end
 
-    command = [yt_dlp_path] + base_options + [search_url]
+  def execute_command(command)
     puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
     begin
       success = system(*command)
@@ -61,26 +74,28 @@ def download_podcasts(config, keywords)
         warn("警告: コマンドの実行に失敗しました (終了ステータス: #{$?.exitstatus})")
       end
     rescue Errno::ENOENT
-      abort("エラー: '#{yt_dlp_path}' コマンドが見つかりません。パスを確認してください。")
+      abort("エラー: '#{@config['yt_dlp_path']}' コマンドが見つかりません。パスを確認してください。")
     rescue => e
       warn("エラー: コマンド実行中に予期せぬエラーが発生しました: #{e.message}")
-      warn(e.backtrace.join("\n"))
+      warn(e.backtrace.join("
+"))
     end
   end
 end
 
-
 if __FILE__ == $0
-  config = load_yaml_file(CONFIG_FILE)
-  keywords = load_yaml_file(KEYWORDS_FILE)
+  SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
+  CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
+  KEYWORDS_FILE = File.join(SCRIPT_DIR, 'podcast_keywords.yml')
 
-  unless config && config['area_id'] && config['audio_dir'] && config['yt_dlp_path']
-    abort("エラー: #{CONFIG_FILE} に必要な設定 (area_id, audio_dir, yt_dlp_path) がありません。")
-  end
+  config = RadikoPodcastForMe.load_yaml_file(CONFIG_FILE)
+  keywords = RadikoPodcastForMe.load_yaml_file(KEYWORDS_FILE)
+
   unless keywords.is_a?(Array)
-     abort("エラー: #{KEYWORDS_FILE} はキーワードの配列を含む必要があります。")
+    abort("エラー: #{KEYWORDS_FILE} はキーワードの配列を含む必要があります。")
   end
 
-  download_podcasts(config, keywords)
+  downloader = PodcastDownloader.new(config, keywords)
+  downloader.download
   puts "処理が完了しました。"
 end
