@@ -32,8 +32,26 @@ def download_podcasts(config, keywords)
     '-P', output_dir,          # 出力ディレクトリ
   ]
 
-  keywords.each do |keyword|
-    search_url = "https://radiko.jp/#!/search/live?key=#{URI.encode_www_form_component(keyword)}&filter=past&area_id=#{area_id}"
+  keywords.each do |keyword_str|
+    search_key = keyword_str
+    station_id = nil
+
+    if match = keyword_str.match(/(.+)&station_id=(.+)/)
+      search_key = match[1]
+      station_id = match[2]
+    end
+
+    query_params = {
+      "key" => search_key,
+      "filter" => "past",
+      "area_id" => area_id
+    }
+
+    if station_id
+      query_params["station_id"] = station_id
+    end
+
+    search_url = "https://radiko.jp/#!/search/live?" + URI.encode_www_form(query_params)
 
     command = [yt_dlp_path] + base_options + [search_url]
     puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
@@ -50,6 +68,7 @@ def download_podcasts(config, keywords)
     end
   end
 end
+
 
 if __FILE__ == $0
   config = load_yaml_file(CONFIG_FILE)
