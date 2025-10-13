@@ -87,10 +87,13 @@ class RssGenerator
     begin
       exif = MiniExiftool.new(file, ignore_minor_errors: true)
       file_size = exif.mediadatasize
-
-      unless file_size
-        warn "警告: ファイルサイズ(MediaDataSize)が取得できませんでした (スキップ): #{file}"
-        return
+      if file_size.nil?
+        begin
+          file_size = File.size(file)
+        rescue => e
+          warn "警告: ファイルサイズが取得できませんでした (スキップ): #{file} - #{e.message}"
+          return
+        end
       end
 
       item_title = build_item_title(filename, exif.title, exif.contentcreatedate)
