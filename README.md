@@ -6,6 +6,8 @@
 
 ## 使い方
 - [yt-dlp-rajiko](https://github.com/garret1317/yt-dlp-rajiko)とウェブサーバーを用意します（説明省略）
+  - pipx install 'yt-dlp[plugins]'
+  - pipx inject yt-dlp yt-dlp-rajiko
 - [exiftool](https://exiftool.org/)をインストールします
   - `brew install exiftool` or `sudo apt install exiftool`
 - `bundle install`を実行します
