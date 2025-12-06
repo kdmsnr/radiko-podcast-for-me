@@ -55,6 +55,7 @@ class PodcastDeleter
   end
 end
 
+# :nocov:
 if __FILE__ == $0
   SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
@@ -66,3 +67,4 @@ if __FILE__ == $0
 
   puts "処理が完了しました。"
 end
+# :nocov:

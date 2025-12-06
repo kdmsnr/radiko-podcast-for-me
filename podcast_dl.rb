@@ -44,10 +44,11 @@ class PodcastDownloader
   end
 
   def parse_keyword(keyword_str)
-    if match = keyword_str.match(/(.+)&station_id=(.+)/)
+    trimmed = keyword_str.strip
+    if match = trimmed.match(/\A(.+?)\s*&station_id=([^\s&]+)\s*\z/)
       [match[1], match[2]]
     else
-      [keyword_str, nil]
+      [trimmed, nil]
     end
   end
 
@@ -71,7 +72,8 @@ class PodcastDownloader
     begin
       success = system(*command)
       unless success
-        warn("警告: コマンドの実行に失敗しました (終了ステータス: #{$?.exitstatus})")
+        exit_status = ($?.respond_to?(:exitstatus) ? $?.exitstatus : 'unknown')
+        warn("警告: コマンドの実行に失敗しました (終了ステータス: #{exit_status})")
       end
     rescue Errno::ENOENT
       abort("エラー: '#{@config['yt_dlp_path']}' コマンドが見つかりません。パスを確認してください。")
@@ -83,6 +85,7 @@ class PodcastDownloader
   end
 end
 
+# :nocov:
 if __FILE__ == $0
   SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
@@ -99,3 +102,4 @@ if __FILE__ == $0
   downloader.download
   puts "処理が完了しました。"
 end
+# :nocov:

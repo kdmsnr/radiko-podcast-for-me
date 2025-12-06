@@ -173,6 +173,7 @@ class RssGenerator
   end
 end
 
+# :nocov:
 if __FILE__ == $0
   SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
@@ -181,3 +182,4 @@ if __FILE__ == $0
   generator = RssGenerator.new(config)
   generator.generate
 end
+# :nocov:
