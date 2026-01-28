@@ -1,9 +1,27 @@
 area_id: "JP13"
 audio_dir: "/var/www/html/podcast/files"
 yt_dlp_path: "/home/kdmsnr/.local/bin/yt-dlp"
+# 単一RSS出力の場合
 rss_file: "/var/www/html/podcast/rss.xml"
 base_url: "http://raspberrypi.local/podcast/files/"
 channel_title: "kdmsnr local podcast"
 channel_link: "http://raspberrypi.local"
 channel_description: "Podcast description"
 expire_month: 6
+
+# 複数RSS出力の場合（feeds を使う）
+# feeds:
+#   - name: "news"
+#     rss_file: "/var/www/html/podcast/news.xml"
+#     match:
+#       - "NEWS_"
+#       - "/news_/"
+#     channel_title: "News Podcast"
+#     channel_link: "http://raspberrypi.local"
+#     channel_description: "News description"
+#   - name: "music"
+#     rss_file: "/var/www/html/podcast/music.xml"
+#     match: "/MUSIC_/"
+#     channel_title: "Music Podcast"
+#     channel_link: "http://raspberrypi.local"
+#     channel_description: "Music description"

@@ -73,6 +73,35 @@ class PodcastRssTest < Minitest::Test
     end
   end
 
+  def test_generate_with_match_filters_items
+    Dir.mktmpdir do |dir|
+      audio_dir = File.join(dir, 'audio')
+      FileUtils.mkdir_p(audio_dir)
+      rss_file = File.join(dir, 'rss.xml')
+      config = base_config(audio_dir, rss_file).merge(
+        'match' => ['news_', '/music_/']
+      )
+      news = File.join(audio_dir, 'news_20240101000000.mp3')
+      music = File.join(audio_dir, 'music_20240102000000.mp3')
+      other = File.join(audio_dir, 'other_20240103000000.mp3')
+      File.write(news, 'data1')
+      File.write(music, 'data2')
+      File.write(other, 'data3')
+      MiniExiftool.register(news, { mediadatasize: 1, title: '', contentcreatedate: nil, description: '' })
+      MiniExiftool.register(music, { mediadatasize: 1, title: '', contentcreatedate: nil, description: '' })
+      MiniExiftool.register(other, { mediadatasize: 1, title: '', contentcreatedate: nil, description: '' })
+
+      generator = RssGenerator.new(config)
+      generator.generate
+      rss = RSS::Parser.parse(File.read(rss_file), false)
+      assert_equal 2, rss.items.size
+      titles = rss.items.map(&:title)
+      assert_includes titles, 'news_20240101000000.mp3'
+      assert_includes titles, 'music_20240102000000.mp3'
+      refute_includes titles, 'other_20240103000000.mp3'
+    end
+  end
+
   def test_initialize_with_missing_config_key
     config = {
       'audio_dir' => '/tmp',

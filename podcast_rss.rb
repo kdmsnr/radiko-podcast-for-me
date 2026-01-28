@@ -25,6 +25,7 @@ class RssGenerator
     validate_config
     @audio_dir = @config['audio_dir']
     @base_url = @config['base_url'].chomp('/') + '/'
+    @matchers = normalize_matchers(@config['match'])
   end
 
   def generate
@@ -39,10 +40,36 @@ class RssGenerator
   private
 
   def validate_config
-    required_keys = %w[audio_dir rss_file base_url channel_title channel_link channel_description]
-    missing_keys = required_keys.reject { |k| @config[k] }
-    unless missing_keys.empty?
-      abort("エラー: 設定ファイルに必要なキーが不足しています: #{missing_keys.join(', ')}")
+    if @config['feeds']
+      required_top = %w[audio_dir base_url]
+      missing_top = required_top.reject { |k| @config[k] }
+      unless missing_top.empty?
+        abort("エラー: 設定ファイルに必要なキーが不足しています: #{missing_top.join(', ')}")
+      end
+      validate_feeds_config(@config['feeds'])
+    else
+      required_keys = %w[audio_dir rss_file base_url channel_title channel_link channel_description]
+      missing_keys = required_keys.reject { |k| @config[k] }
+      unless missing_keys.empty?
+        abort("エラー: 設定ファイルに必要なキーが不足しています: #{missing_keys.join(', ')}")
+      end
+    end
+  end
+
+  def validate_feeds_config(feeds)
+    unless feeds.is_a?(Array)
+      abort("エラー: feeds は配列である必要があります")
+    end
+    feeds.each_with_index do |feed, idx|
+      unless feed.is_a?(Hash)
+        abort("エラー: feeds[#{idx}] はハッシュである必要があります")
+      end
+      required_feed = %w[rss_file channel_title channel_link channel_description]
+      missing = required_feed.reject { |k| feed[k] || @config[k] }
+      unless missing.empty?
+        name = feed['name'] || "feeds[#{idx}]"
+        abort("エラー: #{name} に必要なキーが不足しています: #{missing.join(', ')}")
+      end
     end
   end
 
@@ -56,6 +83,7 @@ class RssGenerator
 
   def add_items(maker)
     files = get_audio_files
+    files = filter_files(files)
     if files.empty?
       puts "INFO: 対象の音声ファイル (#{SUPPORTED_EXTENSIONS.join(', ')}) が見つかりませんでした in #{@audio_dir}"
     else
@@ -78,6 +106,34 @@ class RssGenerator
     Dir.glob(glob_pattern).select do |f|
       File.file?(f) && SUPPORTED_EXTENSIONS.include?(File.extname(f).downcase)
     end.sort
+  end
+
+  def normalize_matchers(matchers)
+    return [] if matchers.nil?
+    list = matchers.is_a?(Array) ? matchers : [matchers]
+    list.map do |matcher|
+      str = matcher.to_s
+      if str.start_with?('/') && str.end_with?('/') && str.length >= 2
+        begin
+          Regexp.new(str[1..-2])
+        rescue RegexpError
+          warn "警告: 正規表現が無効です (#{str})。文字列一致として扱います。"
+          str
+        end
+      else
+        str
+      end
+    end
+  end
+
+  def filter_files(files)
+    return files if @matchers.empty?
+    files.select do |file|
+      name = File.basename(file)
+      @matchers.any? do |matcher|
+        matcher.is_a?(Regexp) ? name.match?(matcher) : name.include?(matcher.to_s)
+      end
+    end
   end
 
   def create_rss_item(maker, file)
@@ -179,7 +235,16 @@ if __FILE__ == $0
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
 
   config = RadikoPodcastForMe.load_yaml_file(CONFIG_FILE)
-  generator = RssGenerator.new(config)
-  generator.generate
+  if config['feeds']
+    base_config = config.reject { |k, _| k == 'feeds' }
+    config['feeds'].each do |feed|
+      merged_config = base_config.merge(feed)
+      generator = RssGenerator.new(merged_config)
+      generator.generate
+    end
+  else
+    generator = RssGenerator.new(config)
+    generator.generate
+  end
 end
 # :nocov:
