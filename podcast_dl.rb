@@ -56,11 +56,13 @@ class PodcastDownloader
     query_params = {
       "key" => search_key,
       "filter" => "past",
-      "area_id" => @config['area_id']
+      "area_id" => @config['area_id'],
+      "cur_area_id" => @config['area_id'],
+      "region_id" => @config.fetch('region_id', 'all')
     }
     query_params["station_id"] = station_id if station_id
 
-    "https://radiko.jp/#!/search/live?" + URI.encode_www_form(query_params)
+    "https://radiko.jp/#!/search/timeshift?" + URI.encode_www_form(query_params)
   end
 
   def build_command(search_url, base_options)

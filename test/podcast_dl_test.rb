@@ -31,8 +31,11 @@ class PodcastDownloaderTest < Minitest::Test
 
   def test_build_search_url_without_station_id
     url = @downloader.send(:build_search_url, 'キーワード', nil)
+    assert_includes url, '/#!/search/timeshift?'
     assert_includes url, 'key=%E3%82%AD%E3%83%BC%E3%83%AF%E3%83%BC%E3%83%89'
     assert_includes url, 'area_id=JP13'
+    assert_includes url, 'cur_area_id=JP13'
+    assert_includes url, 'region_id=all'
     refute_includes url, 'station_id='
   end
 
@@ -55,6 +58,12 @@ class PodcastDownloaderTest < Minitest::Test
     options = downloader.send(:build_base_options)
     idx = options.index('-N')
     assert_equal '10', options[idx + 1]
+  end
+
+  def test_build_search_url_uses_configured_region_id
+    downloader = PodcastDownloader.new(default_config.merge('region_id' => 'JP13'), [])
+    url = downloader.send(:build_search_url, 'keyword', nil)
+    assert_includes url, 'region_id=JP13'
   end
 
   def test_download_invokes_command_for_each_keyword
