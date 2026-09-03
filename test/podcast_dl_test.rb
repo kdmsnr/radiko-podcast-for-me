@@ -1,5 +1,6 @@
 require_relative 'test_helper'
 require 'stringio'
+require 'tmpdir'
 require_relative '../podcast_dl'
 
 class PodcastDownloaderTest < Minitest::Test
@@ -203,12 +204,27 @@ class PodcastDownloaderTest < Minitest::Test
   end
 
   def test_initialize_rejects_invalid_keywords
-    [nil, 'keyword', ['valid', nil], [' ']].each do |invalid_keywords|
+    [nil, 'keyword', [], ['valid', nil], [' ']].each do |invalid_keywords|
       error = assert_raises(PodcastDownloader::ConfigurationError) do
         build_downloader(keywords: invalid_keywords)
       end
       assert_match(/キーワード/, error.message)
     end
+  end
+
+  def test_initialize_normalizes_surrounding_whitespace_in_paths_and_area
+    downloader = build_downloader(
+      config: default_config.merge(
+        'area_id' => ' JP13 ',
+        'audio_dir' => ' /tmp/audio ',
+        'yt_dlp_path' => ' /usr/local/bin/yt-dlp '
+      )
+    )
+
+    command = downloader.send(:build_command, 'https://example.com', downloader.send(:build_base_options))
+    assert_equal '/usr/local/bin/yt-dlp', command.first
+    assert_equal '/tmp/audio', option_value(command, '-P')
+    assert_includes downloader.send(:build_search_url, 'show', nil), 'area_id=JP13'
   end
 
   def test_cli_run_returns_zero_and_reports_completion_on_success
@@ -246,6 +262,21 @@ class PodcastDownloaderTest < Minitest::Test
     assert_match(/終了ステータス: unknown/, stderr.string)
   end
 
+  def test_cli_run_reports_the_real_process_exit_status
+    stderr = StringIO.new
+    config = default_config.merge('yt_dlp_path' => '/usr/bin/false')
+
+    status = PodcastDownloaderCLI.run(
+      config: config,
+      keywords: ['foo'],
+      stdout: StringIO.new,
+      stderr: stderr
+    )
+
+    assert_equal 1, status
+    assert_match(/終了ステータス: 1/, stderr.string)
+  end
+
   def test_cli_run_returns_nonzero_for_invalid_input
     stderr = StringIO.new
 
@@ -261,6 +292,60 @@ class PodcastDownloaderTest < Minitest::Test
     assert_match(/キーワードは配列/, stderr.string)
   end
 
+  def test_cli_run_returns_nonzero_for_empty_keywords
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    status = PodcastDownloaderCLI.run(
+      config: default_config,
+      keywords: [],
+      command_runner: ->(*_command) { flunk 'command should not be called' },
+      stdout: stdout,
+      stderr: stderr
+    )
+
+    assert_equal 1, status
+    refute_match(/処理が完了しました/, stdout.string)
+    assert_match(/1件以上/, stderr.string)
+  end
+
+  def test_cli_run_from_files_loads_config_and_keywords
+    Dir.mktmpdir do |dir|
+      config_path = File.join(dir, 'config.yml')
+      keywords_path = File.join(dir, 'keywords.yml')
+      File.write(config_path, default_config.to_yaml)
+      File.write(keywords_path, "- show\n")
+      commands = []
+
+      status = PodcastDownloaderCLI.run_from_files(
+        config_path: config_path,
+        keywords_path: keywords_path,
+        command_runner: ->(*command) { commands << command; true },
+        stdout: StringIO.new,
+        stderr: StringIO.new
+      )
+
+      assert_equal 0, status
+      assert_equal 1, commands.length
+    end
+  end
+
+  def test_cli_run_from_files_reports_load_errors
+    Dir.mktmpdir do |dir|
+      stderr = StringIO.new
+
+      status = PodcastDownloaderCLI.run_from_files(
+        config_path: File.join(dir, 'missing.yml'),
+        keywords_path: File.join(dir, 'keywords.yml'),
+        stdout: StringIO.new,
+        stderr: stderr
+      )
+
+      assert_equal 1, status
+      assert_match(/ファイルが見つかりません/, stderr.string)
+    end
+  end
+
   private
 
   def parse_keyword(str)
@@ -269,7 +354,7 @@ class PodcastDownloaderTest < Minitest::Test
 
   def build_downloader(
     config: default_config,
-    keywords: [],
+    keywords: ['keyword'],
     command_runner: ->(*_command) { true },
     stdout: StringIO.new,
     stderr: StringIO.new

@@ -10,6 +10,8 @@ channel_title: "kdmsnr local podcast"
 channel_link: "http://raspberrypi.local"
 channel_description: "Podcast description"
 expire_month: 6
+# true にすると非表示ファイルを除く全形式が削除対象になります（省略時は .mp3 / .m4a のみ）
+# delete_all_files: true
 
 # 複数RSS出力の場合（feeds を使う）
 # feeds:

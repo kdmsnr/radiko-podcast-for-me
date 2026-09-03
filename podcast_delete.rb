@@ -44,6 +44,8 @@ class PodcastDeleter
         next if name.start_with?('.')
 
         path = File.join(@directory, name)
+        next unless @delete_all_files || RadikoPodcastForMe.supported_audio_file?(path)
+
         success = false unless process_path(path, threshold_time)
       end
     rescue SystemCallError => e
@@ -66,11 +68,28 @@ class PodcastDeleter
       raise ConfigurationError, "設定ファイルに必要なキーが不足しています: #{missing_keys.join(', ')}"
     end
 
-    @directory = @config['audio_dir']
-    unless @directory.is_a?(String) && !@directory.strip.empty?
+    audio_dir = @config['audio_dir']
+    unless audio_dir.is_a?(String) && !audio_dir.strip.empty?
       raise ConfigurationError, "'audio_dir' は空でない文字列で指定してください。"
     end
+    @directory = audio_dir.strip
+    if root_directory?(@directory)
+      raise ConfigurationError, "'audio_dir' にルートディレクトリは指定できません。"
+    end
+    @delete_all_files = @config.fetch('delete_all_files', false)
+    unless @delete_all_files == true || @delete_all_files == false
+      raise ConfigurationError, "'delete_all_files' は true または false で指定してください。"
+    end
     @expire_months = parse_expire_month(@config['expire_month'])
+  end
+
+  def root_directory?(path)
+    expanded_path = File.expand_path(path)
+    return true if expanded_path == File::SEPARATOR
+
+    File.exist?(path) && File.realpath(path) == File::SEPARATOR
+  rescue SystemCallError
+    false
   end
 
   def parse_expire_month(value)
@@ -132,6 +151,14 @@ module PodcastDeleteRunner
     err.puts "エラー: #{e.message}"
     1
   end
+
+  def self.run_from_file(config_path:, out: $stdout, err: $stderr, **dependencies)
+    config = RadikoPodcastForMe.load_yaml_file(config_path)
+    run(config, out: out, err: err, **dependencies)
+  rescue RadikoPodcastForMe::ConfigurationFileError => e
+    err.puts "エラー: #{e.message}"
+    1
+  end
 end
 
 # :nocov:
@@ -139,7 +166,6 @@ if __FILE__ == $0
   SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
 
-  config = RadikoPodcastForMe.load_yaml_file(CONFIG_FILE)
-  exit PodcastDeleteRunner.run(config)
+  exit PodcastDeleteRunner.run_from_file(config_path: CONFIG_FILE)
 end
 # :nocov:

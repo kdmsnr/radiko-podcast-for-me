@@ -2,6 +2,7 @@ require_relative 'test_helper'
 require 'tmpdir'
 require 'fileutils'
 require 'rss'
+require 'stringio'
 require_relative '../podcast_rss'
 
 class PodcastRssTest < Minitest::Test
@@ -55,9 +56,10 @@ class PodcastRssTest < Minitest::Test
       rss_file = File.join(dir, 'rss.xml')
       config = base_config(audio_dir, rss_file)
       generator = RssGenerator.new(config)
-      assert_raises(SystemExit) do
+      error = assert_raises(RssGenerator::Error) do
         generator.generate
       end
+      assert_match(/音声ファイルディレクトリ/, error.message)
     end
   end
 
@@ -201,6 +203,90 @@ class PodcastRssTest < Minitest::Test
     refute resolved.key?('feeds')
   end
 
+  def test_config_resolver_rejects_duplicate_rss_files
+    Dir.mktmpdir do |dir|
+      nested_dir = File.join(dir, 'feeds')
+      FileUtils.mkdir_p(nested_dir)
+      config = base_config('/tmp/audio', File.join(dir, 'default.xml')).merge(
+        'feeds' => [
+          { 'name' => 'news', 'rss_file' => File.join(dir, 'podcast.xml') },
+          { 'name' => 'music', 'rss_file' => File.join(nested_dir, '..', 'podcast.xml') }
+        ]
+      )
+
+      error = assert_raises(RssConfigResolver::Error) do
+        RssConfigResolver.resolve(config)
+      end
+
+      assert_match(/rss_file が重複/, error.message)
+    end
+  end
+
+  def test_config_resolver_rejects_symlinked_duplicate_rss_files
+    Dir.mktmpdir do |dir|
+      target = File.join(dir, 'podcast.xml')
+      link = File.join(dir, 'podcast-link.xml')
+      File.write(target, 'existing feed')
+      File.symlink(target, link)
+      config = base_config('/tmp/audio', File.join(dir, 'default.xml')).merge(
+        'feeds' => [
+          { 'name' => 'linked', 'rss_file' => link },
+          { 'name' => 'target', 'rss_file' => target }
+        ]
+      )
+
+      error = assert_raises(RssConfigResolver::Error) do
+        RssConfigResolver.resolve(config)
+      end
+
+      assert_match(/rss_file が重複/, error.message)
+    end
+  end
+
+  def test_config_resolver_rejects_an_invalid_regexp_matcher
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge('match' => '/[/')
+
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+
+    assert_match(/正規表現が無効/, error.message)
+  end
+
+  def test_config_resolver_rejects_invalid_matcher_types
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge('match' => ['news', nil])
+
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+
+    assert_match(/2番目/, error.message)
+  end
+
+  def test_config_resolver_rejects_base_url_with_query
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge(
+      'base_url' => 'https://example.com/files?token=secret'
+    )
+
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+
+    assert_match(/HTTP\(S\) URL/, error.message)
+  end
+
+  def test_config_resolver_rejects_a_non_http_channel_link
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge(
+      'channel_link' => 'javascript:alert(1)'
+    )
+
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+
+    assert_match(/channel_link.*HTTP\(S\) URL/, error.message)
+  end
+
   def test_runner_generates_multiple_filtered_feeds
     Dir.mktmpdir do |dir|
       audio_dir = File.join(dir, 'audio')
@@ -233,24 +319,80 @@ class PodcastRssTest < Minitest::Test
     end
   end
 
+  def test_runner_continues_after_one_feed_has_an_operational_error
+    Dir.mktmpdir do |dir|
+      audio_dir = File.join(dir, 'audio')
+      FileUtils.mkdir_p(audio_dir)
+      file = File.join(audio_dir, 'show_20240101000000.mp3')
+      File.write(file, 'show')
+      MiniExiftool.register(file, { mediadatasize: 4, title: 'Show', contentcreatedate: nil, description: '' })
+      failed_rss = File.join(dir, 'failed.xml')
+      working_rss = File.join(dir, 'working.xml')
+      config = base_config(audio_dir, File.join(dir, 'default.xml')).merge(
+        'feeds' => [
+          { 'name' => 'missing', 'audio_dir' => File.join(dir, 'missing'), 'rss_file' => failed_rss },
+          { 'name' => 'working', 'rss_file' => working_rss }
+        ]
+      )
+      err = StringIO.new
+
+      refute RssRunner.new(config, out: StringIO.new, err: err).run
+      refute File.exist?(failed_rss)
+      assert File.exist?(working_rss)
+      assert_match(/missing/, err.string)
+    end
+  end
+
+  def test_runner_keeps_existing_feed_after_write_failure_and_continues
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, 'show_20240101000000.mp3')
+      failed_rss = File.join(dir, 'failed.xml')
+      working_rss = File.join(dir, 'working.xml')
+      File.write(file, 'show')
+      File.write(failed_rss, 'known good feed')
+      MiniExiftool.register(file, { mediadatasize: 4, title: 'Show', contentcreatedate: nil, description: '' })
+      config = base_config(dir, File.join(dir, 'default.xml')).merge(
+        'feeds' => [
+          { 'name' => 'failed', 'rss_file' => failed_rss },
+          { 'name' => 'working', 'rss_file' => working_rss }
+        ]
+      )
+      atomic_writer = RadikoPodcastForMe::AtomicFileWriter.new
+      writer = Object.new
+      writer.define_singleton_method(:write) do |path, content|
+        raise Errno::ENOSPC, 'disk full' if path == failed_rss
+
+        atomic_writer.write(path, content)
+      end
+      err = StringIO.new
+
+      refute RssRunner.new(config, writer: writer, out: StringIO.new, err: err).run
+      assert_equal 'known good feed', File.read(failed_rss)
+      assert File.exist?(working_rss)
+      assert_match(/failed.*書き込みに失敗/, err.string)
+    end
+  end
+
   def test_create_rss_item_handles_missing_exif_file
     Dir.mktmpdir do |dir|
       audio_dir = File.join(dir, 'audio')
       FileUtils.mkdir_p(audio_dir)
       file = File.join(audio_dir, 'missing_20240101000000.mp3')
       File.write(file, 'data')
-      generator = RssGenerator.new(base_config(audio_dir, File.join(dir, 'rss.xml')))
+      stderr = StringIO.new
+      generator = RssGenerator.new(
+        base_config(audio_dir, File.join(dir, 'rss.xml')),
+        out: StringIO.new,
+        err: stderr
+      )
       maker = RSS::Maker.make("2.0") do |m|
         m.channel.title = 't'
         m.channel.link = 'http://example.com'
         m.channel.description = 'desc'
       end
-      result = nil
-      _stdout, stderr = capture_io do
-        result = generator.send(:create_rss_item, maker, file)
-      end
+      result = generator.send(:create_rss_item, maker, file)
       refute result
-      assert_match(/警告: ファイルが見つかりません/, stderr)
+      assert_match(/警告: ファイルが見つかりません/, stderr.string)
     end
   end
 
@@ -266,12 +408,61 @@ class PodcastRssTest < Minitest::Test
       end
 
       refute result
-      assert File.exist?(rss_file)
+      refute File.exist?(rss_file)
       assert_match(/ファイルが見つかりません/, stderr)
     end
   end
 
-  def test_generate_propagates_unexpected_uri_errors
+  def test_generate_publishes_successful_items_and_reports_partial_metadata_failure
+    Dir.mktmpdir do |dir|
+      good_file = File.join(dir, 'good_20240101000000.mp3')
+      bad_file = File.join(dir, 'bad_20240102000000.mp3')
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(good_file, 'good')
+      File.write(bad_file, 'bad')
+      File.write(rss_file, 'known good feed')
+      MiniExiftool.register(good_file, {
+        mediadatasize: 4,
+        title: 'Good',
+        contentcreatedate: nil,
+        description: ''
+      })
+      err = StringIO.new
+
+      result = RssGenerator.new(
+        base_config(dir, rss_file),
+        out: StringIO.new,
+        err: err
+      ).generate
+
+      refute result
+      rss = RSS::Parser.parse(File.read(rss_file), false)
+      assert_equal ['Good'], rss.items.map(&:title)
+      assert_match(/ファイルが見つかりません/, err.string)
+    end
+  end
+
+  def test_generate_keeps_existing_feed_when_all_metadata_reads_fail
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, 'bad_20240102000000.mp3')
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(file, 'bad')
+      File.write(rss_file, 'known good feed')
+      err = StringIO.new
+
+      result = RssGenerator.new(
+        base_config(dir, rss_file),
+        out: StringIO.new,
+        err: err
+      ).generate
+
+      refute result
+      assert_equal 'known good feed', File.read(rss_file)
+      assert_match(/既存のRSSフィードを保持/, err.string)
+    end
+  end
+
+  def test_generate_rejects_an_invalid_base_url_before_writing
     Dir.mktmpdir do |dir|
       file = File.join(dir, 'show_20240101000000.mp3')
       rss_file = File.join(dir, 'rss.xml')
@@ -279,7 +470,7 @@ class PodcastRssTest < Minitest::Test
       MiniExiftool.register(file, { mediadatasize: 4, title: 'Show', contentcreatedate: nil, description: '' })
       config = base_config(dir, rss_file).merge('base_url' => 'http://[invalid')
 
-      assert_raises(URI::InvalidURIError) do
+      assert_raises(RssConfigResolver::Error) do
         RssGenerator.new(config).generate
       end
       refute File.exist?(rss_file)
@@ -302,14 +493,11 @@ class PodcastRssTest < Minitest::Test
       file = File.join(dir, 'episode_20241301000000.mp3')
       File.write(file, 'x')
       config = base_config(dir, File.join(dir, 'rss.xml'))
-      generator = RssGenerator.new(config)
-      result = nil
-      stdout, stderr = capture_io do
-        result = generator.send(:extract_pub_date, 'episode_20241301000000.mp3', Time.now, file)
-      end
+      stderr = StringIO.new
+      generator = RssGenerator.new(config, out: StringIO.new, err: stderr)
+      result = generator.send(:extract_pub_date, 'episode_20241301000000.mp3', Time.now, file)
       refute_nil result
-      assert_equal '', stdout
-      assert_match(/解析できません/, stderr)
+      assert_match(/解析できません/, stderr.string)
     end
   end
 
@@ -361,6 +549,68 @@ class PodcastRssTest < Minitest::Test
       assert_equal "Channel\uFFFDTitle", rss.channel.title
       assert_equal "Before\uFFFDAfter", rss.items.first.title
       assert_equal "Description\uFFFD", rss.items.first.description
+    end
+  end
+
+  def test_cli_run_from_file_loads_config
+    Dir.mktmpdir do |dir|
+      audio_dir = File.join(dir, 'audio')
+      FileUtils.mkdir_p(audio_dir)
+      rss_file = File.join(dir, 'rss.xml')
+      config_path = File.join(dir, 'config.yml')
+      File.write(config_path, base_config(audio_dir, rss_file).to_yaml)
+
+      status = PodcastRssCLI.run_from_file(
+        config_path: config_path,
+        out: StringIO.new,
+        err: StringIO.new
+      )
+
+      assert_equal 0, status
+      assert File.exist?(rss_file)
+    end
+  end
+
+  def test_cli_run_returns_nonzero_when_generation_is_incomplete
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, 'missing_metadata_20240101000000.mp3')
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(file, 'data')
+      err = StringIO.new
+
+      status = PodcastRssCLI.run(
+        config: base_config(dir, rss_file),
+        out: StringIO.new,
+        err: err
+      )
+
+      assert_equal 1, status
+      refute File.exist?(rss_file)
+      assert_match(/一部のRSSフィード/, err.string)
+    end
+  end
+
+  def test_cli_run_returns_nonzero_for_invalid_config
+    err = StringIO.new
+
+    status = PodcastRssCLI.run(config: {}, out: StringIO.new, err: err)
+
+    assert_equal 1, status
+    assert_match(/必要なキーが不足/, err.string)
+  end
+
+  def test_cli_run_from_file_reports_load_errors
+    Dir.mktmpdir do |dir|
+      err = StringIO.new
+
+      status = PodcastRssCLI.run_from_file(
+        config_path: File.join(dir, 'missing.yml'),
+        out: StringIO.new,
+        err: err
+      )
+
+      assert_equal 1, status
+      assert_match(/ファイルが見つかりません/, err.string)
     end
   end
 

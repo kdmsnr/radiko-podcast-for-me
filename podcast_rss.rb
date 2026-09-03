@@ -4,6 +4,7 @@ require 'rss'
 require 'time'
 require 'uri'
 require_relative 'lib/common'
+require_relative 'lib/atomic_file_writer'
 
 begin
   require 'mini_exiftool'
@@ -23,12 +24,14 @@ class RssConfigResolver
     def resolve(config)
       validate_hash!(config, '設定ファイル')
 
-      if config.key?('feeds')
-        resolve_feeds(config)
-      else
-        validate_feed!(config)
-        [config.dup]
-      end
+      feeds = if config.key?('feeds')
+                resolve_feeds(config)
+              else
+                validate_feed!(config)
+                [config.dup]
+              end
+      validate_unique_rss_files!(feeds)
+      feeds
     end
 
     def validate_feed!(config, label: '設定ファイル')
@@ -38,7 +41,35 @@ class RssConfigResolver
       end
 
       validate_required!(config, REQUIRED_KEYS, label)
+      normalize_matchers(config['match'], label: "#{label}.match") if config.key?('match')
+      validate_http_url!(config['base_url'], "#{label}のbase_url", allow_query_or_fragment: false)
+      validate_http_url!(config['channel_link'], "#{label}のchannel_link")
       config
+    end
+
+    def normalize_matchers(matchers, label: 'match')
+      return [] if matchers.nil?
+
+      list = matchers.is_a?(Array) ? matchers : [matchers]
+      invalid_indexes = list.each_index.reject do |index|
+        list[index].is_a?(String) && !list[index].strip.empty?
+      end
+      unless invalid_indexes.empty?
+        positions = invalid_indexes.map { |index| index + 1 }
+        raise Error, "#{label} は空でない文字列で指定してください（対象: #{positions.join(', ')}番目）"
+      end
+
+      list.map do |matcher|
+        if matcher.start_with?('/') && matcher.end_with?('/') && matcher.length >= 2
+          begin
+            Regexp.new(matcher[1..-2])
+          rescue RegexpError => e
+            raise Error, "#{label} の正規表現が無効です: #{matcher.inspect} - #{e.message}"
+          end
+        else
+          matcher
+        end
+      end
     end
 
     private
@@ -84,22 +115,57 @@ class RssConfigResolver
 
       raise Error, "#{label}の値は空でない文字列で指定してください: #{invalid.join(', ')}"
     end
+
+    def validate_unique_rss_files!(feeds)
+      paths = feeds.group_by do |feed|
+        RadikoPodcastForMe.canonical_file_target(feed.fetch('rss_file').strip)
+      end
+      duplicates = paths.select { |_path, configs| configs.length > 1 }.keys
+      return if duplicates.empty?
+
+      raise Error, "rss_file が重複しています: #{duplicates.join(', ')}"
+    rescue SystemCallError => e
+      raise Error, "rss_file の出力先を確認できません: #{e.message}"
+    end
+
+    def validate_http_url!(value, label, allow_query_or_fragment: true)
+      uri = URI.parse(value.strip)
+      valid = uri.is_a?(URI::HTTP) && !uri.host.to_s.empty?
+      valid &&= uri.query.nil? && uri.fragment.nil? unless allow_query_or_fragment
+      return if valid
+
+      qualifier = allow_query_or_fragment ? '' : 'クエリ・フラグメントのない'
+      raise Error, "#{label} は#{qualifier}HTTP(S) URLで指定してください"
+    rescue URI::InvalidURIError => e
+      raise Error, "#{label} が正しいURLではありません: #{e.message}"
+    end
   end
 end
 
 class RssGenerator
-  SUPPORTED_EXTENSIONS = %w[.mp3 .m4a].freeze
+  class Error < StandardError; end
+
+  SUPPORTED_EXTENSIONS = RadikoPodcastForMe::SUPPORTED_AUDIO_EXTENSIONS
   DATE_FORMAT_IN_TITLE = '%Y-%m-%d'
   FILENAME_DATE_PATTERN = /\d{14}/
   FILENAME_DATE_FORMAT = '%Y%m%d%H%M%S'
   INVALID_XML_CHARACTERS = /[\u{0}-\u{8}\u{b}\u{c}\u{e}-\u{1f}\u{fffe}\u{ffff}]/
 
-  def initialize(config)
+  def initialize(
+    config,
+    writer: RadikoPodcastForMe::AtomicFileWriter.new,
+    out: $stdout,
+    err: $stderr
+  )
     @config = config
     validate_config
-    @audio_dir = @config['audio_dir']
-    @base_url = @config['base_url'].chomp('/') + '/'
-    @matchers = normalize_matchers(@config['match'])
+    @audio_dir = @config['audio_dir'].strip
+    @output_file = @config['rss_file'].strip
+    @base_url = @config['base_url'].strip.chomp('/') + '/'
+    @matchers = RssConfigResolver.normalize_matchers(@config['match'])
+    @writer = writer
+    @out = out
+    @err = err
   end
 
   def generate
@@ -107,6 +173,11 @@ class RssGenerator
     rss_content = RSS::Maker.make("2.0") do |maker|
       setup_channel(maker)
       items_succeeded = add_items(maker)
+    end
+
+    if !items_succeeded && rss_content.items.empty?
+      @err.puts "エラー: 有効なRSSアイテムを生成できなかったため、既存のRSSフィードを保持しました: #{@output_file}"
+      return false
     end
 
     write_rss_file(rss_content)
@@ -122,7 +193,7 @@ class RssGenerator
   def setup_channel(maker)
     maker.encoding = "UTF-8"
     maker.channel.title = xml_text(@config['channel_title'])
-    maker.channel.link = xml_text(@config['channel_link'])
+    maker.channel.link = xml_text(@config['channel_link'].strip)
     maker.channel.description = xml_text(@config['channel_description'])
     maker.channel.language = xml_text(@config.fetch('channel_language', 'ja'))
   end
@@ -131,49 +202,34 @@ class RssGenerator
     files = get_audio_files
     files = filter_files(files)
     if files.empty?
-      puts "INFO: 対象の音声ファイル (#{SUPPORTED_EXTENSIONS.join(', ')}) が見つかりませんでした in #{@audio_dir}"
-    else
-      puts "INFO: #{files.count}個の音声ファイルを処理します..."
-      item_results = files.map do |file|
-        create_rss_item(maker, file)
-      end
+      @out.puts "INFO: 対象の音声ファイル (#{SUPPORTED_EXTENSIONS.join(', ')}) が見つかりませんでした in #{@audio_dir}"
+      return true
+    end
+
+    @out.puts "INFO: #{files.count}個の音声ファイルを処理します..."
+    item_results = files.map do |file|
+      create_rss_item(maker, file)
     end
 
     if maker.items.empty? && !files.empty?
-      warn "WARN: 音声ファイルは見つかりましたが、有効なRSSアイテムは生成されませんでした。"
+      @err.puts "WARN: 音声ファイルは見つかりましたが、有効なRSSアイテムは生成されませんでした。"
     end
 
-    files.empty? || item_results.all?
+    item_results.all?
   end
 
   def get_audio_files
     unless Dir.exist?(@audio_dir)
-      abort("エラー: 音声ファイルディレクトリが見つかりません: #{@audio_dir}")
+      raise Error, "音声ファイルディレクトリが見つかりません: #{@audio_dir}"
     end
     Dir.each_child(@audio_dir).each_with_object([]) do |name, files|
       next if name.start_with?('.')
 
       path = File.join(@audio_dir, name)
-      files << path if File.file?(path) && SUPPORTED_EXTENSIONS.include?(File.extname(path).downcase)
+      files << path if File.file?(path) && RadikoPodcastForMe.supported_audio_file?(path)
     end.sort
-  end
-
-  def normalize_matchers(matchers)
-    return [] if matchers.nil?
-    list = matchers.is_a?(Array) ? matchers : [matchers]
-    list.map do |matcher|
-      str = matcher.to_s
-      if str.start_with?('/') && str.end_with?('/') && str.length >= 2
-        begin
-          Regexp.new(str[1..-2])
-        rescue RegexpError
-          warn "警告: 正規表現が無効です (#{str})。文字列一致として扱います。"
-          str
-        end
-      else
-        str
-      end
-    end
+  rescue SystemCallError => e
+    raise Error, "音声ファイルディレクトリを読み込めません: #{@audio_dir} - #{e.message}"
   end
 
   def filter_files(files)
@@ -188,7 +244,7 @@ class RssGenerator
 
   def create_rss_item(maker, file)
     filename = File.basename(file)
-    puts "  処理中: #{filename}"
+    @out.puts "  処理中: #{filename}"
 
     metadata = read_audio_metadata(file)
     return false unless metadata
@@ -224,13 +280,13 @@ class RssGenerator
       description: exif.description
     }
   rescue Errno::ENOENT
-    warn "警告: ファイルが見つかりません (スキップ): #{file}"
+    @err.puts "警告: ファイルが見つかりません (スキップ): #{file}"
     nil
   rescue MiniExiftool::Error => e
-    warn "警告: Exif情報取得エラー (#{e.message}) (スキップ): #{file}"
+    @err.puts "警告: Exif情報取得エラー (#{e.message}) (スキップ): #{file}"
     nil
   rescue SystemCallError => e
-    warn "警告: ファイル情報が取得できませんでした (スキップ): #{file} - #{e.message}"
+    @err.puts "警告: ファイル情報が取得できませんでした (スキップ): #{file} - #{e.message}"
     nil
   end
 
@@ -248,30 +304,29 @@ class RssGenerator
       begin
         pub_date = Time.strptime(date_match[0], FILENAME_DATE_FORMAT)
       rescue ArgumentError
-        warn "警告: ファイル名 '#{filename}' の日付文字列 '#{date_match[0]}' を解析できません。"
+        @err.puts "警告: ファイル名 '#{filename}' の日付文字列 '#{date_match[0]}' を解析できません。"
       end
     else
-      warn "警告: ファイル名 '#{filename}' に日付パターン '#{FILENAME_DATE_PATTERN}' が見つかりません。"
+      @err.puts "警告: ファイル名 '#{filename}' に日付パターン '#{FILENAME_DATE_PATTERN}' が見つかりません。"
     end
     pub_date ||= create_date if create_date.is_a?(Time)
     unless pub_date
       begin
         pub_date = File.mtime(file)
       rescue SystemCallError => e
-        warn "警告: ファイルの更新日時が取得できませんでした: #{file} - #{e.message}"
+        @err.puts "警告: ファイルの更新日時が取得できませんでした: #{file} - #{e.message}"
       end
     end
     pub_date
   end
 
   def write_rss_file(rss_content)
-    output_file = @config['rss_file']
     begin
-      File.write(output_file, rss_content.to_s, encoding: "UTF-8")
-      puts "RSSフィードを生成しました: #{output_file}"
-    rescue => e
-      abort("エラー: RSSファイルの書き込みに失敗しました: #{output_file} - #{e.message}")
+      @writer.write(@output_file, rss_content.to_s)
+    rescue SystemCallError, IOError => e
+      raise Error, "RSSファイルの書き込みに失敗しました: #{@output_file} - #{e.message}"
     end
+    @out.puts "RSSフィードを生成しました: #{@output_file}"
   end
 
   def u(text)
@@ -294,18 +349,62 @@ class RssGenerator
 end
 
 class RssRunner
-  def initialize(config, generator_class: RssGenerator)
+  def initialize(
+    config,
+    generator_class: RssGenerator,
+    writer: RadikoPodcastForMe::AtomicFileWriter.new,
+    out: $stdout,
+    err: $stderr
+  )
     @config = config
     @generator_class = generator_class
+    @writer = writer
+    @out = out
+    @err = err
   end
 
   def run
     succeeded = true
     RssConfigResolver.resolve(@config).each do |feed_config|
-      feed_succeeded = @generator_class.new(feed_config).generate
-      succeeded = false unless feed_succeeded
+      begin
+        feed_succeeded = @generator_class.new(
+          feed_config,
+          writer: @writer,
+          out: @out,
+          err: @err
+        ).generate
+        succeeded = false unless feed_succeeded
+      rescue RssGenerator::Error => e
+        label = feed_config['name'] || feed_config['rss_file']
+        @err.puts "エラー: RSSフィードの生成に失敗しました (#{label}): #{e.message}"
+        succeeded = false
+      end
     end
     succeeded
+  end
+end
+
+module PodcastRssCLI
+  module_function
+
+  def run(config:, out: $stdout, err: $stderr, **dependencies)
+    if RssRunner.new(config, out: out, err: err, **dependencies).run
+      0
+    else
+      err.puts 'エラー: 一部のRSSフィードを生成できませんでした。'
+      1
+    end
+  rescue RssConfigResolver::Error => e
+    err.puts "エラー: #{e.message}"
+    1
+  end
+
+  def run_from_file(config_path:, out: $stdout, err: $stderr, **dependencies)
+    config = RadikoPodcastForMe.load_yaml_file(config_path)
+    run(config: config, out: out, err: err, **dependencies)
+  rescue RadikoPodcastForMe::ConfigurationFileError => e
+    err.puts "エラー: #{e.message}"
+    1
   end
 end
 
@@ -314,12 +413,6 @@ if __FILE__ == $0
   SCRIPT_DIR = File.expand_path(File.dirname(__FILE__))
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
 
-  begin
-    config = RadikoPodcastForMe.load_yaml_file(CONFIG_FILE)
-    succeeded = RssRunner.new(config).run
-  rescue RssConfigResolver::Error => e
-    abort("エラー: #{e.message}")
-  end
-  exit(false) unless succeeded
+  exit PodcastRssCLI.run_from_file(config_path: CONFIG_FILE)
 end
 # :nocov:

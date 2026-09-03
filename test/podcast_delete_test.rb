@@ -55,6 +55,35 @@ class PodcastDeleterTest < Minitest::Test
     end
   end
 
+  def test_delete_old_files_preserves_non_audio_files
+    Dir.mktmpdir do |dir|
+      old_audio = create_file(dir, 'old.MP3', Time.local(2024, 1, 1))
+      old_notes = create_file(dir, 'notes.txt', Time.local(2024, 1, 1))
+      old_feed = create_file(dir, 'rss.xml', Time.local(2024, 1, 1))
+
+      assert build_deleter(dir, expire_month: 1).delete_old_files
+      refute File.exist?(old_audio)
+      assert File.exist?(old_notes)
+      assert File.exist?(old_feed)
+    end
+  end
+
+  def test_delete_old_files_can_explicitly_include_all_file_types
+    Dir.mktmpdir do |dir|
+      old_notes = create_file(dir, 'notes.txt', Time.local(2024, 1, 1))
+      settings = config(dir, 1).merge('delete_all_files' => true)
+      deleter = PodcastDeleter.new(
+        settings,
+        today: -> { TODAY },
+        out: StringIO.new,
+        err: StringIO.new
+      )
+
+      assert deleter.delete_old_files
+      refute File.exist?(old_notes)
+    end
+  end
+
   def test_delete_old_files_returns_false_when_directory_missing
     Dir.mktmpdir do |dir|
       missing_dir = File.join(dir, 'missing')
@@ -204,6 +233,46 @@ class PodcastDeleterTest < Minitest::Test
     end
   end
 
+  def test_initialize_rejects_non_boolean_delete_all_files
+    error = assert_raises(PodcastDeleter::ConfigurationError) do
+      PodcastDeleter.new(config('/tmp', 1).merge('delete_all_files' => 'true'))
+    end
+
+    assert_match(/delete_all_files/, error.message)
+  end
+
+  def test_initialize_rejects_root_as_audio_directory
+    error = assert_raises(PodcastDeleter::ConfigurationError) do
+      PodcastDeleter.new(config('/', 1))
+    end
+
+    assert_match(/ルートディレクトリ/, error.message)
+  end
+
+  def test_initialize_rejects_a_symlink_path_that_resolves_to_root
+    Dir.mktmpdir do |dir|
+      root_link = File.join(dir, 'root')
+      File.symlink('/', root_link)
+      disguised_root = File.join(root_link, '..')
+
+      assert_equal '/', File.realpath(disguised_root)
+      error = assert_raises(PodcastDeleter::ConfigurationError) do
+        PodcastDeleter.new(config(disguised_root, 1))
+      end
+
+      assert_match(/ルートディレクトリ/, error.message)
+    end
+  end
+
+  def test_initialize_normalizes_surrounding_whitespace_in_audio_directory
+    Dir.mktmpdir do |dir|
+      old_file = create_file(dir, 'old.mp3', Time.local(2024, 1, 1))
+
+      assert build_deleter(" #{dir} ", expire_month: 1).delete_old_files
+      refute File.exist?(old_file)
+    end
+  end
+
   def test_runner_returns_nonzero_for_invalid_config
     err = StringIO.new
 
@@ -211,6 +280,41 @@ class PodcastDeleterTest < Minitest::Test
 
     assert_equal 1, status
     assert_match(/expire_month/, err.string)
+  end
+
+  def test_runner_from_file_loads_config
+    Dir.mktmpdir do |dir|
+      config_path = File.join(dir, 'config.yml')
+      audio_dir = File.join(dir, 'audio')
+      FileUtils.mkdir_p(audio_dir)
+      File.write(config_path, config(audio_dir, 1).to_yaml)
+      out = StringIO.new
+
+      status = PodcastDeleteRunner.run_from_file(
+        config_path: config_path,
+        today: -> { TODAY },
+        out: out,
+        err: StringIO.new
+      )
+
+      assert_equal 0, status
+      assert_match(/処理が完了しました/, out.string)
+    end
+  end
+
+  def test_runner_from_file_reports_load_errors
+    Dir.mktmpdir do |dir|
+      err = StringIO.new
+
+      status = PodcastDeleteRunner.run_from_file(
+        config_path: File.join(dir, 'missing.yml'),
+        out: StringIO.new,
+        err: err
+      )
+
+      assert_equal 1, status
+      assert_match(/ファイルが見つかりません/, err.string)
+    end
   end
 
   def test_initialize_with_non_positive_expire_month

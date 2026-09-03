@@ -18,9 +18,9 @@ class PodcastDownloader
 
     validate_config(config)
     @keywords = validate_keywords(keywords)
-    @area_id = config['area_id']
-    @audio_dir = config['audio_dir']
-    @yt_dlp_path = config['yt_dlp_path']
+    @area_id = config['area_id'].strip
+    @audio_dir = config['audio_dir'].strip
+    @yt_dlp_path = config['yt_dlp_path'].strip
     @concurrent_fragments = concurrent_fragments(config)
   end
 
@@ -63,6 +63,9 @@ class PodcastDownloader
   def validate_keywords(keywords)
     unless keywords.is_a?(Array)
       raise ConfigurationError, 'キーワードは配列で指定してください。'
+    end
+    if keywords.empty?
+      raise ConfigurationError, 'キーワードには1件以上の番組を指定してください。'
     end
 
     invalid_indexes = keywords.each_index.reject do |index|
@@ -189,6 +192,27 @@ module PodcastDownloaderCLI
     stderr.puts "エラー: #{e.message}"
     1
   end
+
+  def run_from_files(
+    config_path:,
+    keywords_path:,
+    command_runner: nil,
+    stdout: $stdout,
+    stderr: $stderr
+  )
+    config = RadikoPodcastForMe.load_yaml_file(config_path)
+    keywords = RadikoPodcastForMe.load_yaml_file(keywords_path)
+    run(
+      config: config,
+      keywords: keywords,
+      command_runner: command_runner,
+      stdout: stdout,
+      stderr: stderr
+    )
+  rescue RadikoPodcastForMe::ConfigurationFileError => e
+    stderr.puts "エラー: #{e.message}"
+    1
+  end
 end
 
 # :nocov:
@@ -197,9 +221,9 @@ if __FILE__ == $0
   CONFIG_FILE = File.join(SCRIPT_DIR, 'config.yml')
   KEYWORDS_FILE = File.join(SCRIPT_DIR, 'podcast_keywords.yml')
 
-  config = RadikoPodcastForMe.load_yaml_file(CONFIG_FILE)
-  keywords = RadikoPodcastForMe.load_yaml_file(KEYWORDS_FILE)
-
-  exit PodcastDownloaderCLI.run(config: config, keywords: keywords)
+  exit PodcastDownloaderCLI.run_from_files(
+    config_path: CONFIG_FILE,
+    keywords_path: KEYWORDS_FILE
+  )
 end
 # :nocov:

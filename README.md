@@ -21,7 +21,20 @@
 - スクリプトを実行します
   - podcast_dl.rb はファイルをダウンロードします
   - podcast_rss.rb はダウンロードしたファイルからrss.xmlを生成します
-  - podcast_delete.rb は古いファイルを削除します（必要なければ使わない）
+    - 音声ファイルが見つかったのに有効なRSSアイテムを1件も生成できない場合、既存のRSSは保持されます
+    - 安全に置き換えるため、RSS出力先ディレクトリには一時ファイルの作成とrenameの権限が必要です
+    - 既存のRSSの所有者・グループ・モードを引き継ぐため、実行ユーザーからそれらを設定できる必要があります
+  - podcast_delete.rb は古い `.mp3` / `.m4a` ファイルを削除します（必要なければ使わない）
+    - yt-dlpの残骸など他形式も削除する場合は `delete_all_files: true` を明示します
+
+```sh
+cd /path/to/radiko-podcast-for-me
+bundle exec ruby podcast_dl.rb
+bundle exec ruby podcast_rss.rb
+bundle exec ruby podcast_delete.rb
+```
+
+cronからも、リポジトリへ移動して `bundle exec ruby ...` の形で実行してください。各スクリプトは一部でも処理に失敗すると終了コード1を返します。
 
 ## テスト
 
