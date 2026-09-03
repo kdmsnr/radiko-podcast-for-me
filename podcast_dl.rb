@@ -5,41 +5,115 @@ require 'uri'
 require_relative 'lib/common'
 
 class PodcastDownloader
-  def initialize(config, keywords)
-    @config = config
-    @keywords = keywords
-    validate_config
+  class ConfigurationError < ArgumentError; end
+
+  DEFAULT_CONCURRENT_FRAGMENTS = 5
+  REQUIRED_CONFIG_KEYS = %w[area_id audio_dir yt_dlp_path].freeze
+
+  def initialize(config, keywords, command_runner: nil, stdout: $stdout, stderr: $stderr)
+    @stdout = stdout
+    @stderr = stderr
+    @uses_default_command_runner = command_runner.nil?
+    @command_runner = command_runner || ->(*command) { system(*command) }
+
+    validate_config(config)
+    @keywords = validate_keywords(keywords)
+    @area_id = config['area_id']
+    @audio_dir = config['audio_dir']
+    @yt_dlp_path = config['yt_dlp_path']
+    @concurrent_fragments = concurrent_fragments(config)
   end
 
   def download
     base_options = build_base_options
+    successful = true
 
     @keywords.each do |keyword_str|
       search_key, station_id = parse_keyword(keyword_str)
       search_url = build_search_url(search_key, station_id)
       command = build_command(search_url, base_options)
 
-      execute_command(command)
+      successful = false unless execute_command(command)
     end
+
+    successful
   end
 
   private
 
-  def validate_config
-    required_keys = %w[area_id audio_dir yt_dlp_path]
-    missing_keys = required_keys.reject { |k| @config[k] }
-    unless missing_keys.empty?
-      abort("エラー: 設定ファイルに必要なキーが不足しています: #{missing_keys.join(', ')}")
+  def validate_config(config)
+    unless config.is_a?(Hash)
+      raise ConfigurationError, '設定ファイルはキーと値の組で指定してください。'
     end
+
+    missing_keys = REQUIRED_CONFIG_KEYS.reject { |key| config.key?(key) }
+    unless missing_keys.empty?
+      raise ConfigurationError, "設定ファイルに必要なキーが不足しています: #{missing_keys.join(', ')}"
+    end
+
+    invalid_keys = REQUIRED_CONFIG_KEYS.reject do |key|
+      config[key].is_a?(String) && !config[key].strip.empty?
+    end
+    return if invalid_keys.empty?
+
+    raise ConfigurationError,
+          "設定ファイルの値は空でない文字列で指定してください: #{invalid_keys.join(', ')}"
+  end
+
+  def validate_keywords(keywords)
+    unless keywords.is_a?(Array)
+      raise ConfigurationError, 'キーワードは配列で指定してください。'
+    end
+
+    invalid_indexes = keywords.each_index.reject do |index|
+      keywords[index].is_a?(String) && !keywords[index].strip.empty?
+    end
+    unless invalid_indexes.empty?
+      positions = invalid_indexes.map { |index| index + 1 }
+      raise ConfigurationError,
+            "キーワードは空でない文字列で指定してください（対象: #{positions.join(', ')}番目）。"
+    end
+
+    keywords.map(&:strip).freeze
+  end
+
+  def concurrent_fragments(config)
+    if config.key?('download_count')
+      @stderr.puts(
+        "警告: 'download_count' は非推奨です。'-N' はダウンロード件数ではなく" \
+        "同時フラグメント数のため、'concurrent_fragments' を使用してください。"
+      )
+    end
+
+    key = if config.key?('concurrent_fragments')
+            'concurrent_fragments'
+          elsif config.key?('download_count')
+            'download_count'
+          end
+
+    value = key ? config[key] : DEFAULT_CONCURRENT_FRAGMENTS
+    parse_positive_integer(value, key || 'concurrent_fragments')
+  end
+
+  def parse_positive_integer(value, key)
+    integer = if value.is_a?(Integer)
+                value
+              elsif value.is_a?(String) && value.match?(/\A[+-]?\d+\z/)
+                value.to_i
+              end
+
+    return integer if integer&.positive?
+
+    raise ConfigurationError, "'#{key}' は正の整数で指定してください（現在値: #{value.inspect}）。"
   end
 
   def build_base_options
     [
       '-x',
-      '-N', @config.fetch('download_count', 5).to_s,
+      '-N', @concurrent_fragments.to_s,
       '--embed-metadata',
       '--playlist-reverse',
-      '-P', @config['audio_dir'],
+      '-P', @audio_dir,
     ]
   end
 
@@ -56,7 +130,7 @@ class PodcastDownloader
     query_params = {
       "key" => search_key,
       "filter" => "past",
-      "area_id" => @config['area_id']
+      "area_id" => @area_id
     }
     query_params["station_id"] = station_id if station_id
 
@@ -64,24 +138,56 @@ class PodcastDownloader
   end
 
   def build_command(search_url, base_options)
-    [@config['yt_dlp_path']] + base_options + [search_url]
+    [@yt_dlp_path] + base_options + [search_url]
   end
 
   def execute_command(command)
-    puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
-    begin
-      success = system(*command)
-      unless success
-        exit_status = ($?.respond_to?(:exitstatus) ? $?.exitstatus : 'unknown')
-        warn("警告: コマンドの実行に失敗しました (終了ステータス: #{exit_status})")
-      end
-    rescue Errno::ENOENT
-      abort("エラー: '#{@config['yt_dlp_path']}' コマンドが見つかりません。パスを確認してください。")
-    rescue => e
-      warn("エラー: コマンド実行中に予期せぬエラーが発生しました: #{e.message}")
-      warn(e.backtrace.join("
-"))
+    @stdout.puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
+    success = @command_runner.call(*command)
+
+    if success.nil?
+      @stderr.puts "エラー: '#{@yt_dlp_path}' コマンドを実行できませんでした。パスを確認してください。"
+      return false
     end
+
+    return true if success
+
+    process_status = @uses_default_command_runner ? $? : nil
+    exit_status = process_status&.exitstatus || 'unknown'
+    @stderr.puts "警告: コマンドの実行に失敗しました (終了ステータス: #{exit_status})"
+    false
+  rescue Errno::ENOENT
+    @stderr.puts "エラー: '#{@yt_dlp_path}' コマンドが見つかりません。パスを確認してください。"
+    false
+  rescue StandardError => e
+    @stderr.puts "エラー: コマンド実行中に予期せぬエラーが発生しました: #{e.message}"
+    @stderr.puts Array(e.backtrace).join("\n")
+    false
+  end
+end
+
+module PodcastDownloaderCLI
+  module_function
+
+  def run(config:, keywords:, command_runner: nil, stdout: $stdout, stderr: $stderr)
+    downloader = PodcastDownloader.new(
+      config,
+      keywords,
+      command_runner: command_runner,
+      stdout: stdout,
+      stderr: stderr
+    )
+
+    if downloader.download
+      stdout.puts '処理が完了しました。'
+      0
+    else
+      stderr.puts 'エラー: 一部のダウンロードに失敗しました。'
+      1
+    end
+  rescue PodcastDownloader::ConfigurationError => e
+    stderr.puts "エラー: #{e.message}"
+    1
   end
 end
 
@@ -94,12 +200,6 @@ if __FILE__ == $0
   config = RadikoPodcastForMe.load_yaml_file(CONFIG_FILE)
   keywords = RadikoPodcastForMe.load_yaml_file(KEYWORDS_FILE)
 
-  unless keywords.is_a?(Array)
-    abort("エラー: #{KEYWORDS_FILE} はキーワードの配列を含む必要があります。")
-  end
-
-  downloader = PodcastDownloader.new(config, keywords)
-  downloader.download
-  puts "処理が完了しました。"
+  exit PodcastDownloaderCLI.run(config: config, keywords: keywords)
 end
 # :nocov:

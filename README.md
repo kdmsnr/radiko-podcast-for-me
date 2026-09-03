@@ -12,6 +12,7 @@
   - `brew install exiftool` or `sudo apt install exiftool`
 - `bundle install`を実行します
 - config.ymlを設定します
+  - `concurrent_fragments` はyt-dlpが同時取得するフラグメント数です（省略時は5、番組の取得件数ではありません）
   - RSSを複数出力したい場合は `feeds` を使います（`match` でファイル名を絞り込み）
     - `match` は文字列 or `/正規表現/` を指定でき、配列で複数指定可能
 - podcast_keywords.ymlに録音したいキーワードを記入します
@@ -21,3 +22,9 @@
   - podcast_dl.rb はファイルをダウンロードします
   - podcast_rss.rb はダウンロードしたファイルからrss.xmlを生成します
   - podcast_delete.rb は古いファイルを削除します（必要なければ使わない）
+
+## テスト
+
+```sh
+bundle exec ruby -Itest -e 'Dir["test/**/*_test.rb"].sort.each { |file| require File.expand_path(file) }'
+```

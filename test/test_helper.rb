@@ -6,6 +6,7 @@ $LOAD_PATH.unshift(test_dir) unless $LOAD_PATH.include?(test_dir)
 
 PROJECT_ROOT = File.expand_path('..', __dir__)
 TEST_DIR_PREFIX = File.join(PROJECT_ROOT, 'test') + File::SEPARATOR
+VENDOR_DIR_PREFIX = File.join(PROJECT_ROOT, 'vendor') + File::SEPARATOR
 
 def compute_nocov_lines(file)
   nocov_lines = []
@@ -27,7 +28,9 @@ end
 at_exit do
   coverage = Coverage.result
   relevant = coverage.select do |file, _|
-    file.start_with?(PROJECT_ROOT) && !file.start_with?(TEST_DIR_PREFIX)
+    file.start_with?(PROJECT_ROOT) &&
+      !file.start_with?(TEST_DIR_PREFIX) &&
+      !file.start_with?(VENDOR_DIR_PREFIX)
   end
 
   if relevant.empty?

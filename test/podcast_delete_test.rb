@@ -1,82 +1,254 @@
 require_relative 'test_helper'
 require 'tmpdir'
 require 'fileutils'
+require 'stringio'
 require_relative '../podcast_delete'
 
 class PodcastDeleterTest < Minitest::Test
+  TODAY = Date.new(2024, 3, 31)
+
   def test_delete_old_files_removes_only_expired_items
     Dir.mktmpdir do |dir|
-      old_file = File.join(dir, 'old.mp3')
-      new_file = File.join(dir, 'new.mp3')
-      File.write(old_file, 'old')
-      File.write(new_file, 'new')
-      old_time = Time.now - (60 * 60 * 24 * 120)
-      File.utime(old_time, old_time, old_file)
-      config = {
-        'audio_dir' => dir,
-        'expire_month' => 2
-      }
-      deleter = PodcastDeleter.new(config)
-      deleter.delete_old_files
+      old_file = create_file(dir, 'old.mp3', Time.local(2024, 1, 30, 23, 59, 59))
+      new_file = create_file(dir, 'new.mp3', Time.local(2024, 2, 1))
+      deleter = build_deleter(dir, expire_month: 2)
+
+      assert deleter.delete_old_files
       refute File.exist?(old_file)
       assert File.exist?(new_file)
     end
   end
 
-  def test_delete_old_files_raises_when_directory_missing
-    config = {
-      'audio_dir' => '/tmp/non-existent-dir',
-      'expire_month' => 1
-    }
-    deleter = PodcastDeleter.new(config)
-    assert_raises(SystemExit) do
-      deleter.delete_old_files
+  def test_delete_old_files_uses_calendar_month_boundary
+    Dir.mktmpdir do |dir|
+      before_boundary = create_file(dir, 'before.mp3', Time.local(2024, 2, 28, 23, 59, 59))
+      at_boundary = create_file(dir, 'at.mp3', Time.local(2024, 2, 29))
+      deleter = build_deleter(dir, expire_month: 1)
+
+      assert deleter.delete_old_files
+      refute File.exist?(before_boundary)
+      assert File.exist?(at_boundary)
     end
   end
 
-  def test_initialize_with_invalid_expire_month
-    config = {
-      'audio_dir' => '/tmp',
-      'expire_month' => 'abc'
-    }
-    assert_raises(SystemExit) do
-      PodcastDeleter.new(config)
+  def test_delete_old_files_treats_glob_characters_in_directory_as_literals
+    Dir.mktmpdir do |parent|
+      dir = File.join(parent, 'audio*')
+      sibling_dir = File.join(parent, 'audio-other')
+      Dir.mkdir(dir)
+      Dir.mkdir(sibling_dir)
+      old_file = create_file(dir, 'old.mp3', Time.local(2024, 1, 1))
+      sibling_file = create_file(sibling_dir, 'must-stay.mp3', Time.local(2024, 1, 1))
+
+      assert build_deleter(dir, expire_month: 1).delete_old_files
+      refute File.exist?(old_file)
+      assert File.exist?(sibling_file)
     end
+  end
+
+  def test_delete_old_files_preserves_hidden_files
+    Dir.mktmpdir do |dir|
+      hidden_file = create_file(dir, '.keep', Time.local(2024, 1, 1))
+
+      assert build_deleter(dir, expire_month: 1).delete_old_files
+      assert File.exist?(hidden_file)
+    end
+  end
+
+  def test_delete_old_files_returns_false_when_directory_missing
+    Dir.mktmpdir do |dir|
+      missing_dir = File.join(dir, 'missing')
+      err = StringIO.new
+      deleter = build_deleter(missing_dir, err: err)
+
+      refute deleter.delete_old_files
+      assert_match(/ディレクトリが存在しません/, err.string)
+    end
+  end
+
+  def test_delete_old_files_ignores_dangling_symlinks
+    Dir.mktmpdir do |dir|
+      link = File.join(dir, 'missing.mp3')
+      File.symlink(File.join(dir, 'does-not-exist'), link)
+
+      assert build_deleter(dir).delete_old_files
+      assert File.symlink?(link)
+    end
+  end
+
+  def test_delete_old_files_continues_after_stat_failure
+    Dir.mktmpdir do |dir|
+      unreadable_file = create_file(dir, 'unreadable.mp3', Time.local(2024, 1, 1))
+      removable_file = create_file(dir, 'removable.mp3', Time.local(2024, 1, 1))
+      err = StringIO.new
+      stat = lambda do |path|
+        raise Errno::EACCES, path if path == unreadable_file
+
+        File.stat(path)
+      end
+      deleter = build_deleter(dir, expire_month: 1, stat: stat, err: err)
+
+      refute deleter.delete_old_files
+      assert File.exist?(unreadable_file)
+      refute File.exist?(removable_file)
+      assert_match(/ファイル情報の取得に失敗しました/, err.string)
+    end
+  end
+
+  def test_delete_old_files_continues_after_deletion_failure
+    Dir.mktmpdir do |dir|
+      failed_file = create_file(dir, 'failed.mp3', Time.local(2024, 1, 1))
+      removable_file = create_file(dir, 'removable.mp3', Time.local(2024, 1, 1))
+      err = StringIO.new
+      remover = lambda do |path|
+        raise Errno::EACCES, path if path == failed_file
+
+        FileUtils.rm(path)
+      end
+      deleter = build_deleter(dir, expire_month: 1, remover: remover, err: err)
+
+      refute deleter.delete_old_files
+      assert File.exist?(failed_file)
+      refute File.exist?(removable_file)
+      assert_match(/ファイルの削除に失敗しました/, err.string)
+    end
+  end
+
+  def test_delete_old_files_treats_an_already_removed_file_as_success
+    Dir.mktmpdir do |dir|
+      disappearing_file = create_file(dir, 'disappearing.mp3', Time.local(2024, 1, 1))
+      remover = lambda do |path|
+        FileUtils.rm(path)
+        raise Errno::ENOENT, path
+      end
+      deleter = build_deleter(dir, expire_month: 1, remover: remover)
+
+      assert deleter.delete_old_files
+      refute File.exist?(disappearing_file)
+    end
+  end
+
+  def test_runner_returns_nonzero_when_a_deletion_fails
+    Dir.mktmpdir do |dir|
+      create_file(dir, 'old.mp3', Time.local(2024, 1, 1))
+      out = StringIO.new
+      err = StringIO.new
+      remover = ->(_path) { raise Errno::EACCES, 'permission denied' }
+
+      status = PodcastDeleteRunner.run(
+        config(dir, 1),
+        today: -> { TODAY },
+        remover: remover,
+        out: out,
+        err: err
+      )
+
+      assert_equal 1, status
+      refute_match(/処理が完了しました/, out.string)
+      assert_match(/一部のファイルを処理できませんでした/, err.string)
+    end
+  end
+
+  def test_runner_returns_zero_after_success
+    Dir.mktmpdir do |dir|
+      out = StringIO.new
+      err = StringIO.new
+
+      status = PodcastDeleteRunner.run(
+        config(dir, 1),
+        today: -> { TODAY },
+        out: out,
+        err: err
+      )
+
+      assert_equal 0, status
+      assert_match(/処理が完了しました/, out.string)
+      assert_empty err.string
+    end
+  end
+
+  def test_initialize_accepts_an_integer_string
+    Dir.mktmpdir do |dir|
+      deleter = build_deleter(dir, expire_month: '2')
+
+      assert deleter.delete_old_files
+    end
+  end
+
+  def test_initialize_rejects_invalid_expire_month_string
+    assert_invalid_expire_month('abc')
+    assert_invalid_expire_month(' 2')
+    assert_invalid_expire_month('2.0')
+  end
+
+  def test_initialize_rejects_non_integer_expire_month_types
+    assert_invalid_expire_month(2.0)
+    assert_invalid_expire_month(true)
+    assert_invalid_expire_month(false)
+    assert_invalid_expire_month([])
   end
 
   def test_initialize_with_missing_keys
-    config = {'audio_dir' => '/tmp'}
-    assert_raises(SystemExit) do
-      PodcastDeleter.new(config)
+    error = assert_raises(PodcastDeleter::ConfigurationError) do
+      PodcastDeleter.new({ 'audio_dir' => '/tmp' })
     end
+    assert_match(/expire_month/, error.message)
+  end
+
+  def test_initialize_rejects_invalid_audio_directory
+    ['', ' ', true].each do |value|
+      error = assert_raises(PodcastDeleter::ConfigurationError) do
+        PodcastDeleter.new(config(value, 1))
+      end
+      assert_match(/audio_dir/, error.message)
+    end
+  end
+
+  def test_runner_returns_nonzero_for_invalid_config
+    err = StringIO.new
+
+    status = PodcastDeleteRunner.run({ 'audio_dir' => '/tmp' }, out: StringIO.new, err: err)
+
+    assert_equal 1, status
+    assert_match(/expire_month/, err.string)
   end
 
   def test_initialize_with_non_positive_expire_month
-    config = {
-      'audio_dir' => '/tmp',
-      'expire_month' => 0
-    }
-    assert_raises(SystemExit) do
-      PodcastDeleter.new(config)
-    end
+    assert_invalid_expire_month(0)
+    assert_invalid_expire_month(-1)
+    assert_invalid_expire_month('-1')
   end
 
-  def test_delete_old_files_warns_when_deletion_fails
-    Dir.mktmpdir do |dir|
-      old_file = File.join(dir, 'old.mp3')
-      File.write(old_file, 'old')
-      File.utime(Time.now - (60 * 60 * 24 * 120), Time.now - (60 * 60 * 24 * 120), old_file)
-      config = {
-        'audio_dir' => dir,
-        'expire_month' => 2
-      }
-      deleter = PodcastDeleter.new(config)
-      FileUtils.stub(:rm, proc { |_path| raise 'permission denied' }) do
-        _stdout, stderr = capture_io do
-          deleter.delete_old_files
-        end
-        assert_match(/警告: ファイルの削除に失敗しました/, stderr)
-      end
+  private
+
+  def config(dir, expire_month)
+    {
+      'audio_dir' => dir,
+      'expire_month' => expire_month
+    }
+  end
+
+  def build_deleter(dir, expire_month: 2, **dependencies)
+    PodcastDeleter.new(
+      config(dir, expire_month),
+      today: -> { TODAY },
+      out: StringIO.new,
+      err: StringIO.new,
+      **dependencies
+    )
+  end
+
+  def create_file(dir, name, mtime)
+    path = File.join(dir, name)
+    File.write(path, name)
+    File.utime(mtime, mtime, path)
+    path
+  end
+
+  def assert_invalid_expire_month(value)
+    error = assert_raises(PodcastDeleter::ConfigurationError) do
+      PodcastDeleter.new(config('/tmp', value))
     end
+    assert_match(/'expire_month' は正の整数/, error.message)
   end
 end

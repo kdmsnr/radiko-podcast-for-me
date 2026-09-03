@@ -102,13 +102,134 @@ class PodcastRssTest < Minitest::Test
     end
   end
 
+  def test_generate_treats_glob_characters_in_audio_directory_as_literals
+    Dir.mktmpdir do |parent|
+      audio_dir = File.join(parent, 'audio*')
+      sibling_dir = File.join(parent, 'audio-other')
+      FileUtils.mkdir_p([audio_dir, sibling_dir])
+      rss_file = File.join(parent, 'rss.xml')
+      included = File.join(audio_dir, 'included_20240101000000.mp3')
+      excluded = File.join(sibling_dir, 'excluded_20240102000000.mp3')
+      File.write(included, 'included')
+      File.write(excluded, 'excluded')
+      MiniExiftool.register(included, { mediadatasize: 8, title: 'Included', contentcreatedate: nil, description: '' })
+      MiniExiftool.register(excluded, { mediadatasize: 8, title: 'Excluded', contentcreatedate: nil, description: '' })
+
+      assert RssGenerator.new(base_config(audio_dir, rss_file)).generate
+
+      rss = RSS::Parser.parse(File.read(rss_file), false)
+      assert_equal ['Included'], rss.items.map(&:title)
+    end
+  end
+
   def test_initialize_with_missing_config_key
     config = {
       'audio_dir' => '/tmp',
       'rss_file' => '/tmp/rss.xml'
     }
-    assert_raises(SystemExit) do
+    assert_raises(RssConfigResolver::Error) do
       RssGenerator.new(config)
+    end
+  end
+
+  def test_config_resolver_rejects_blank_or_non_string_required_values
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge(
+      'audio_dir' => ' ',
+      'channel_title' => 123
+    )
+
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+
+    assert_match(/audio_dir, channel_title/, error.message)
+  end
+
+  def test_config_resolver_resolves_single_feed
+    config = base_config('/tmp/audio', '/tmp/rss.xml')
+
+    resolved = RssConfigResolver.resolve(config)
+
+    assert_equal [config], resolved
+    refute_same config, resolved.first
+  end
+
+  def test_config_resolver_rejects_empty_feeds
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge('feeds' => [])
+
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+
+    assert_match(/1件以上/, error.message)
+  end
+
+  def test_config_resolver_rejects_invalid_feed_types
+    config = base_config('/tmp/audio', '/tmp/rss.xml').merge('feeds' => 'news')
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+    assert_match(/feeds は配列/, error.message)
+
+    config['feeds'] = [nil]
+    error = assert_raises(RssConfigResolver::Error) do
+      RssConfigResolver.resolve(config)
+    end
+    assert_match(/feeds\[0\] はハッシュ/, error.message)
+  end
+
+  def test_config_resolver_inherits_top_level_feed_values
+    config = base_config('/tmp/audio', '/tmp/default.xml').merge(
+      'channel_language' => 'en',
+      'match' => 'common_',
+      'feeds' => [
+        {
+          'name' => 'news',
+          'rss_file' => '/tmp/news.xml',
+          'match' => 'news_'
+        }
+      ]
+    )
+
+    resolved = RssConfigResolver.resolve(config).first
+
+    assert_equal '/tmp/audio', resolved['audio_dir']
+    assert_equal 'My Podcast', resolved['channel_title']
+    assert_equal 'en', resolved['channel_language']
+    assert_equal '/tmp/news.xml', resolved['rss_file']
+    assert_equal 'news_', resolved['match']
+    refute resolved.key?('feeds')
+  end
+
+  def test_runner_generates_multiple_filtered_feeds
+    Dir.mktmpdir do |dir|
+      audio_dir = File.join(dir, 'audio')
+      FileUtils.mkdir_p(audio_dir)
+      news_rss_file = File.join(dir, 'news.xml')
+      music_rss_file = File.join(dir, 'music.xml')
+      default_rss_file = File.join(dir, 'default.xml')
+      news = File.join(audio_dir, 'news_20240101000000.mp3')
+      music = File.join(audio_dir, 'music_20240102000000.mp3')
+      File.write(news, 'news')
+      File.write(music, 'music')
+      MiniExiftool.register(news, { mediadatasize: 4, title: 'News', contentcreatedate: nil, description: '' })
+      MiniExiftool.register(music, { mediadatasize: 5, title: 'Music', contentcreatedate: nil, description: '' })
+      config = base_config(audio_dir, default_rss_file).merge(
+        'feeds' => [
+          { 'rss_file' => news_rss_file, 'channel_title' => 'News Feed', 'match' => 'news_' },
+          { 'rss_file' => music_rss_file, 'channel_title' => 'Music Feed', 'match' => 'music_' }
+        ]
+      )
+
+      assert RssRunner.new(config).run
+
+      news_rss = RSS::Parser.parse(File.read(news_rss_file), false)
+      music_rss = RSS::Parser.parse(File.read(music_rss_file), false)
+      assert_equal 'News Feed', news_rss.channel.title
+      assert_equal ['News'], news_rss.items.map(&:title)
+      assert_equal 'Music Feed', music_rss.channel.title
+      assert_equal ['Music'], music_rss.items.map(&:title)
+      refute File.exist?(default_rss_file)
     end
   end
 
@@ -124,10 +245,44 @@ class PodcastRssTest < Minitest::Test
         m.channel.link = 'http://example.com'
         m.channel.description = 'desc'
       end
+      result = nil
       _stdout, stderr = capture_io do
-        generator.send(:create_rss_item, maker, file)
+        result = generator.send(:create_rss_item, maker, file)
       end
+      refute result
       assert_match(/警告: ファイルが見つかりません/, stderr)
+    end
+  end
+
+  def test_runner_reports_skipped_metadata_as_failure
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, 'missing_metadata_20240101000000.mp3')
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(file, 'data')
+
+      result = nil
+      _stdout, stderr = capture_io do
+        result = RssRunner.new(base_config(dir, rss_file)).run
+      end
+
+      refute result
+      assert File.exist?(rss_file)
+      assert_match(/ファイルが見つかりません/, stderr)
+    end
+  end
+
+  def test_generate_propagates_unexpected_uri_errors
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, 'show_20240101000000.mp3')
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(file, 'data')
+      MiniExiftool.register(file, { mediadatasize: 4, title: 'Show', contentcreatedate: nil, description: '' })
+      config = base_config(dir, rss_file).merge('base_url' => 'http://[invalid')
+
+      assert_raises(URI::InvalidURIError) do
+        RssGenerator.new(config).generate
+      end
+      refute File.exist?(rss_file)
     end
   end
 
@@ -163,10 +318,50 @@ class PodcastRssTest < Minitest::Test
     assert_equal 'application/octet-stream', generator.send(:mime_type, 'file.wav')
   end
 
-  def test_helpers_escape_values
-    generator = RssGenerator.new(base_config('/tmp', '/tmp/rss.xml'))
-    assert_equal 'a&amp;b', generator.send(:h, 'a&b')
-    assert_equal 'file%20name%2Emp3', generator.send(:u, 'file name.mp3')
+  def test_generate_preserves_special_characters_in_item_text
+    Dir.mktmpdir do |dir|
+      filename = 'rock & roll_20240101000000.mp3'
+      file = File.join(dir, filename)
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(file, 'data')
+      MiniExiftool.register(file, {
+        mediadatasize: 4,
+        title: 'Rock & Roll <Live>',
+        contentcreatedate: nil,
+        description: 'A < B & C > D'
+      })
+
+      RssGenerator.new(base_config(dir, rss_file)).generate
+      item = RSS::Parser.parse(File.read(rss_file), false).items.first
+
+      assert_equal 'Rock & Roll <Live>', item.title
+      assert_equal 'A < B & C > D', item.description
+      assert_equal 'http://example.com/files/rock%20%26%20roll_20240101000000%2Emp3', item.enclosure.url
+    end
+  end
+
+  def test_generate_replaces_characters_forbidden_by_xml_1_0
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, 'control_20240101000000.mp3')
+      rss_file = File.join(dir, 'rss.xml')
+      File.write(file, 'data')
+      MiniExiftool.register(file, {
+        mediadatasize: 4,
+        title: "Before\u0001After",
+        contentcreatedate: nil,
+        description: "Description\uFFFF"
+      })
+      config = base_config(dir, rss_file).merge('channel_title' => "Channel\u0002Title")
+
+      assert RssGenerator.new(config).generate
+
+      raw_rss = File.read(rss_file)
+      refute_match(RssGenerator::INVALID_XML_CHARACTERS, raw_rss)
+      rss = RSS::Parser.parse(raw_rss, false)
+      assert_equal "Channel\uFFFDTitle", rss.channel.title
+      assert_equal "Before\uFFFDAfter", rss.items.first.title
+      assert_equal "Description\uFFFD", rss.items.first.description
+    end
   end
 
   private

@@ -1,6 +1,8 @@
 area_id: "JP13"
 audio_dir: "/var/www/html/podcast/files"
 yt_dlp_path: "/home/kdmsnr/.local/bin/yt-dlp"
+# yt-dlp が同時取得するフラグメント数（番組の取得件数ではありません）
+concurrent_fragments: 5
 # 単一RSS出力の場合
 rss_file: "/var/www/html/podcast/rss.xml"
 base_url: "http://raspberrypi.local/podcast/files/"

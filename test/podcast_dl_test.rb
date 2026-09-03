@@ -1,14 +1,10 @@
 require_relative 'test_helper'
+require 'stringio'
 require_relative '../podcast_dl'
 
 class PodcastDownloaderTest < Minitest::Test
   def setup
-    config = {
-      'area_id' => 'JP13',
-      'audio_dir' => '/tmp/audio',
-      'yt_dlp_path' => '/usr/local/bin/yt-dlp'
-    }
-    @downloader = PodcastDownloader.new(config, [])
+    @downloader = build_downloader
   end
 
   def test_parse_keyword_with_station_id_suffix
@@ -50,79 +46,245 @@ class PodcastDownloaderTest < Minitest::Test
     assert_includes command, '--embed-metadata'
   end
 
-  def test_build_base_options_uses_custom_download_count
-    downloader = PodcastDownloader.new(default_config.merge('download_count' => 10), [])
-    options = downloader.send(:build_base_options)
-    idx = options.index('-N')
-    assert_equal '10', options[idx + 1]
+  def test_build_base_options_uses_default_concurrent_fragments
+    options = @downloader.send(:build_base_options)
+    assert_equal '5', option_value(options, '-N')
   end
 
-  def test_download_invokes_command_for_each_keyword
-    keywords = ['foo', 'bar&station_id=ABC']
-    downloader = PodcastDownloader.new(default_config, keywords)
-    executed = []
-    downloader.define_singleton_method(:execute_command) do |cmd|
-      executed << cmd
+  def test_build_base_options_uses_custom_concurrent_fragments
+    downloader = build_downloader(config: default_config.merge('concurrent_fragments' => 10))
+    options = downloader.send(:build_base_options)
+    assert_equal '10', option_value(options, '-N')
+  end
+
+  def test_legacy_download_count_is_an_alias_with_a_warning
+    stderr = StringIO.new
+    downloader = build_downloader(
+      config: default_config.merge('download_count' => '3'),
+      stderr: stderr
+    )
+
+    options = downloader.send(:build_base_options)
+    assert_equal '3', option_value(options, '-N')
+    assert_match(/download_count.*非推奨/, stderr.string)
+    assert_match(/concurrent_fragments/, stderr.string)
+  end
+
+  def test_concurrent_fragments_takes_precedence_over_legacy_alias
+    stderr = StringIO.new
+    downloader = build_downloader(
+      config: default_config.merge('concurrent_fragments' => 7, 'download_count' => 3),
+      stderr: stderr
+    )
+
+    options = downloader.send(:build_base_options)
+    assert_equal '7', option_value(options, '-N')
+    assert_match(/download_count.*非推奨/, stderr.string)
+  end
+
+  def test_concurrent_fragments_must_be_a_positive_integer
+    [0, -1, 'abc', 1.5, true].each do |invalid_value|
+      error = assert_raises(PodcastDownloader::ConfigurationError) do
+        build_downloader(config: default_config.merge('concurrent_fragments' => invalid_value))
+      end
+      assert_match(/正の整数/, error.message)
     end
-    downloader.download
+  end
+
+  def test_download_invokes_runner_for_each_keyword_and_returns_true
+    executed = []
+    runner = lambda do |*command|
+      executed << command
+      true
+    end
+    downloader = build_downloader(
+      keywords: ['foo', 'bar&station_id=ABC'],
+      command_runner: runner
+    )
+
+    assert downloader.download
     assert_equal 2, executed.size
     assert_match(/key=foo/, executed.first.last)
     assert_match(/station_id=ABC/, executed.last.last)
   end
 
-  def test_initialize_with_missing_config_key
+  def test_download_continues_after_failure_and_aggregates_result
+    executed = []
+    results = [false, true, false]
+    runner = lambda do |*command|
+      executed << command
+      results.shift
+    end
+    downloader = build_downloader(
+      keywords: %w[first second third],
+      command_runner: runner
+    )
+
+    refute downloader.download
+    assert_equal 3, executed.size
+    assert executed[1].last.include?('key=second')
+  end
+
+  def test_download_treats_nil_runner_result_as_missing_binary
+    stderr = StringIO.new
+    downloader = build_downloader(
+      keywords: ['foo'],
+      command_runner: ->(*_command) {},
+      stderr: stderr
+    )
+
+    refute downloader.download
+    assert_match(%r{/usr/local/bin/yt-dlp}, stderr.string)
+    assert_match(/実行できませんでした/, stderr.string)
+  end
+
+  def test_download_handles_missing_binary_exception_and_continues
+    calls = 0
+    runner = lambda do |*_command|
+      calls += 1
+      raise Errno::ENOENT if calls == 1
+
+      true
+    end
+    stderr = StringIO.new
+    downloader = build_downloader(
+      keywords: %w[first second],
+      command_runner: runner,
+      stderr: stderr
+    )
+
+    refute downloader.download
+    assert_equal 2, calls
+    assert_match(/コマンドが見つかりません/, stderr.string)
+  end
+
+  def test_download_handles_unexpected_runner_error_and_continues
+    calls = 0
+    runner = lambda do |*_command|
+      calls += 1
+      raise 'boom' if calls == 1
+
+      true
+    end
+    stderr = StringIO.new
+    downloader = build_downloader(
+      keywords: %w[first second],
+      command_runner: runner,
+      stderr: stderr
+    )
+
+    refute downloader.download
+    assert_equal 2, calls
+    assert_match(/予期せぬエラー/, stderr.string)
+    assert_match(/boom/, stderr.string)
+  end
+
+  def test_initialize_rejects_non_hash_config
+    error = assert_raises(PodcastDownloader::ConfigurationError) do
+      build_downloader(config: nil)
+    end
+    assert_match(/キーと値の組/, error.message)
+  end
+
+  def test_initialize_rejects_missing_config_key
     config = {'audio_dir' => '/tmp', 'yt_dlp_path' => '/bin/echo'}
-    assert_raises(SystemExit) do
-      PodcastDownloader.new(config, [])
+    error = assert_raises(PodcastDownloader::ConfigurationError) do
+      build_downloader(config: config)
+    end
+    assert_match(/area_id/, error.message)
+  end
+
+  def test_initialize_rejects_blank_or_non_string_config_values
+    config = default_config.merge('audio_dir' => ' ', 'area_id' => 13)
+    error = assert_raises(PodcastDownloader::ConfigurationError) do
+      build_downloader(config: config)
+    end
+    assert_match(/area_id, audio_dir/, error.message)
+  end
+
+  def test_initialize_rejects_invalid_keywords
+    [nil, 'keyword', ['valid', nil], [' ']].each do |invalid_keywords|
+      error = assert_raises(PodcastDownloader::ConfigurationError) do
+        build_downloader(keywords: invalid_keywords)
+      end
+      assert_match(/キーワード/, error.message)
     end
   end
 
-  def test_execute_command_success_outputs_command
-    downloader = PodcastDownloader.new(default_config, [])
-    downloader.define_singleton_method(:system) { |_cmd = nil, *_rest| true }
-    stdout, stderr = capture_io do
-      downloader.send(:execute_command, ['echo', 'hello'])
-    end
-    assert_match(/実行コマンド:/, stdout)
-    assert_equal '', stderr
+  def test_cli_run_returns_zero_and_reports_completion_on_success
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    status = PodcastDownloaderCLI.run(
+      config: default_config,
+      keywords: ['foo'],
+      command_runner: ->(*_command) { true },
+      stdout: stdout,
+      stderr: stderr
+    )
+
+    assert_equal 0, status
+    assert_match(/処理が完了しました/, stdout.string)
+    assert_equal '', stderr.string
   end
 
-  def test_execute_command_warns_on_failure
-    downloader = PodcastDownloader.new(default_config, [])
-    downloader.define_singleton_method(:system) { |_cmd = nil, *_rest| false }
-    stdout, stderr = capture_io do
-      downloader.send(:execute_command, ['cmd'])
-    end
-    assert_match(/実行コマンド:/, stdout)
-    assert_match(/コマンドの実行に失敗/, stderr)
+  def test_cli_run_returns_nonzero_and_omits_completion_on_failure
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    status = PodcastDownloaderCLI.run(
+      config: default_config,
+      keywords: ['foo'],
+      command_runner: ->(*_command) { false },
+      stdout: stdout,
+      stderr: stderr
+    )
+
+    assert_equal 1, status
+    refute_match(/処理が完了しました/, stdout.string)
+    assert_match(/一部のダウンロードに失敗/, stderr.string)
+    assert_match(/終了ステータス: unknown/, stderr.string)
   end
 
-  def test_execute_command_aborts_when_binary_missing
-    downloader = PodcastDownloader.new(default_config.merge('yt_dlp_path' => '/missing/bin'), [])
-    downloader.define_singleton_method(:system) do |_cmd = nil, *_rest|
-      raise Errno::ENOENT
-    end
-    assert_raises(SystemExit) do
-      capture_io { downloader.send(:execute_command, ['cmd']) }
-    end
-  end
+  def test_cli_run_returns_nonzero_for_invalid_input
+    stderr = StringIO.new
 
-  def test_execute_command_warns_on_unexpected_error
-    downloader = PodcastDownloader.new(default_config, [])
-    downloader.define_singleton_method(:system) do |_cmd = nil, *_rest|
-      raise 'boom'
-    end
-    stdout, stderr = capture_io do
-      downloader.send(:execute_command, ['cmd'])
-    end
-    assert_match(/実行コマンド:/, stdout)
-    assert_match(/予期せぬエラー/, stderr)
+    status = PodcastDownloaderCLI.run(
+      config: default_config,
+      keywords: nil,
+      command_runner: ->(*_command) { true },
+      stdout: StringIO.new,
+      stderr: stderr
+    )
+
+    assert_equal 1, status
+    assert_match(/キーワードは配列/, stderr.string)
   end
 
   private
 
   def parse_keyword(str)
     @downloader.send(:parse_keyword, str)
+  end
+
+  def build_downloader(
+    config: default_config,
+    keywords: [],
+    command_runner: ->(*_command) { true },
+    stdout: StringIO.new,
+    stderr: StringIO.new
+  )
+    PodcastDownloader.new(
+      config,
+      keywords,
+      command_runner: command_runner,
+      stdout: stdout,
+      stderr: stderr
+    )
+  end
+
+  def option_value(options, option)
+    options.fetch(options.index(option) + 1)
   end
 
   def default_config
