@@ -10,6 +10,8 @@ class PodcastDownloader
   DEFAULT_CONCURRENT_FRAGMENTS = 5
   REQUIRED_CONFIG_KEYS = %w[area_id audio_dir yt_dlp_path].freeze
 
+  attr_reader :failed_keywords
+
   def initialize(config, keywords, command_runner: nil, stdout: $stdout, stderr: $stderr)
     @stdout = stdout
     @stderr = stderr
@@ -22,21 +24,23 @@ class PodcastDownloader
     @audio_dir = config['audio_dir'].strip
     @yt_dlp_path = config['yt_dlp_path'].strip
     @concurrent_fragments = concurrent_fragments(config)
+    @failed_keywords = []
   end
 
   def download
     base_options = build_base_options
-    successful = true
+    @failed_keywords = []
 
     @keywords.each do |keyword_str|
+      @stdout.puts "検索キーワード: #{keyword_str}"
       search_key, station_id = parse_keyword(keyword_str)
       search_url = build_search_url(search_key, station_id)
       command = build_command(search_url, base_options)
 
-      successful = false unless execute_command(command)
+      @failed_keywords << keyword_str unless execute_command(command)
     end
 
-    successful
+    @failed_keywords.empty?
   end
 
   private
@@ -146,6 +150,7 @@ class PodcastDownloader
 
   def execute_command(command)
     @stdout.puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
+    @stdout.flush
     success = @command_runner.call(*command)
 
     if success.nil?
@@ -186,6 +191,9 @@ module PodcastDownloaderCLI
       0
     else
       stderr.puts 'エラー: 一部のダウンロードに失敗しました。'
+      stderr.puts '失敗したキーワード:'
+      downloader.failed_keywords.each { |keyword| stderr.puts "  - #{keyword}" }
+      stderr.puts '各キーワードのログにある ERROR: または警告・エラーを確認してください。'
       1
     end
   rescue PodcastDownloader::ConfigurationError => e

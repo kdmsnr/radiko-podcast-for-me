@@ -124,6 +124,17 @@ class PodcastDownloaderTest < Minitest::Test
     refute downloader.download
     assert_equal 3, executed.size
     assert executed[1].last.include?('key=second')
+    assert_equal %w[first third], downloader.failed_keywords
+  end
+
+  def test_download_clears_failures_before_running_again
+    results = [false, true]
+    downloader = build_downloader(command_runner: ->(*_command) { results.shift })
+
+    refute downloader.download
+    assert_equal ['keyword'], downloader.failed_keywords
+    assert downloader.download
+    assert_empty downloader.failed_keywords
   end
 
   def test_download_treats_nil_runner_result_as_missing_binary
@@ -275,6 +286,56 @@ class PodcastDownloaderTest < Minitest::Test
 
     assert_equal 1, status
     assert_match(/終了ステータス: 1/, stderr.string)
+  end
+
+  def test_cli_identifies_earlier_failure_when_last_search_has_no_results
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = lambda do |*command|
+      if command.last.include?('key=failed')
+        false
+      else
+        stdout.puts '[RadikoSearch] Playlist empty: Downloading 0 items'
+        stdout.puts '[download] Finished downloading playlist: empty'
+        true
+      end
+    end
+
+    status = PodcastDownloaderCLI.run(
+      config: default_config,
+      keywords: ['failed&station_id=LFR', 'empty'],
+      command_runner: runner,
+      stdout: stdout,
+      stderr: stderr
+    )
+
+    assert_equal 1, status
+    assert_includes stdout.string, 'Downloading 0 items'
+    assert_includes stdout.string, '検索キーワード: failed&station_id=LFR'
+    assert_includes stderr.string, "失敗したキーワード:\n  - failed&station_id=LFR\n"
+    refute_includes stderr.string, '  - empty'
+    refute_includes stdout.string, '処理が完了しました。'
+  end
+
+  def test_cli_treats_empty_playlist_with_successful_exit_as_success
+    stdout = StringIO.new
+    stderr = StringIO.new
+    runner = lambda do |*_command|
+      stdout.puts '[RadikoSearch] Playlist empty: Downloading 0 items'
+      true
+    end
+
+    status = PodcastDownloaderCLI.run(
+      config: default_config,
+      keywords: ['empty'],
+      command_runner: runner,
+      stdout: stdout,
+      stderr: stderr
+    )
+
+    assert_equal 0, status
+    assert_includes stdout.string, '処理が完了しました。'
+    assert_empty stderr.string
   end
 
   def test_cli_run_returns_nonzero_for_invalid_input
