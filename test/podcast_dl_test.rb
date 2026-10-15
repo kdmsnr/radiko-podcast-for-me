@@ -1,6 +1,7 @@
 require_relative 'test_helper'
 require 'stringio'
 require 'tmpdir'
+require 'rbconfig'
 require_relative '../podcast_dl'
 
 class PodcastDownloaderTest < Minitest::Test
@@ -36,6 +37,21 @@ class PodcastDownloaderTest < Minitest::Test
   def test_build_search_url_with_station_id
     url = @downloader.send(:build_search_url, 'keyword', 'LFR')
     assert_includes url, 'station_id=LFR'
+  end
+
+  def test_search_key_preserves_internal_spaces_and_trims_surrounding_spaces
+    executed = []
+    downloader = build_downloader(
+      keywords: [' TM Network ', 'Tokyo Midtown presents The Lifestyle MUSEUM', 'GURU 水曜日 '],
+      command_runner: ->(*command) { executed << command; true }
+    )
+
+    assert downloader.download
+    keys = executed.map do |command|
+      query = URI.parse(command.last).fragment.split('?', 2).last
+      URI.decode_www_form(query).to_h.fetch('key')
+    end
+    assert_equal ['TM Network', 'Tokyo Midtown presents The Lifestyle MUSEUM', 'GURU 水曜日'], keys
   end
 
   def test_build_command_includes_base_options
@@ -317,6 +333,152 @@ class PodcastDownloaderTest < Minitest::Test
     refute_includes stdout.string, '処理が完了しました。'
   end
 
+  def test_cli_repeats_subprocess_error_after_later_output_and_successful_search
+    with_fake_yt_dlp(<<~'RUBY') do |path|
+      require 'uri'
+      query = URI.parse(ARGV.last).fragment.split('?', 2).last
+      key = URI.decode_www_form(query).to_h.fetch('key')
+      if key == 'TM Network'
+        STDERR.puts "\e[31mERROR: この番組は取得できません\e[0m"
+        2000.times do |index|
+          STDOUT.puts "stdout progress #{index} " + 'x' * 100
+          STDERR.puts "stderr progress #{index} " + 'x' * 100
+        end
+        exit 7
+      end
+      STDOUT.puts 'successful next search'
+    RUBY
+      stdout = StringIO.new
+      stderr = StringIO.new
+      status = PodcastDownloaderCLI.run(
+        config: default_config.merge('yt_dlp_path' => path),
+        keywords: ['TM Network', 'TMNetwork'],
+        stdout: stdout,
+        stderr: stderr
+      )
+
+      assert_equal 1, status
+      assert_includes stdout.string, 'successful next search'
+      assert_includes stdout.string, 'stdout progress 1999'
+      assert_includes stderr.string, 'stderr progress 1999'
+      refute_includes stdout.string, 'stderr progress'
+      summary = stderr.string.split("失敗したキーワード:\n", 2).last
+      assert_includes summary, '  - TM Network'
+      refute_includes summary, '  - TMNetwork'
+      assert_includes summary, '終了ステータス: 7'
+      assert_includes summary, 'ERROR: この番組は取得できません'
+      refute_includes summary, "\e["
+      refute_includes summary, 'progress'
+    end
+  end
+
+  def test_cli_shows_bounded_output_tail_when_subprocess_has_no_error_line
+    with_fake_yt_dlp(<<~'RUBY') do |path|
+      30.times { |index| STDERR.puts "diagnostic line #{index}" }
+      exit 2
+    RUBY
+      stderr = StringIO.new
+      status = PodcastDownloaderCLI.run(
+        config: default_config.merge('yt_dlp_path' => path),
+        keywords: ['TM Network'],
+        stdout: StringIO.new,
+        stderr: stderr
+      )
+
+      assert_equal 1, status
+      summary = stderr.string.split("失敗したキーワード:\n", 2).last
+      assert_includes summary, '終了ステータス: 2'
+      assert_includes summary, 'diagnostic line 29'
+      refute_includes summary, 'diagnostic line 19'
+      assert_equal 10, summary.lines.count { |line| line.include?('diagnostic line') }
+    end
+  end
+
+  def test_cli_includes_missing_executable_reason_in_summary
+    Dir.mktmpdir do |dir|
+      stderr = StringIO.new
+      status = PodcastDownloaderCLI.run(
+        config: default_config.merge('yt_dlp_path' => File.join(dir, 'missing')),
+        keywords: ['TM Network'],
+        stdout: StringIO.new,
+        stderr: stderr
+      )
+
+      assert_equal 1, status
+      summary = stderr.string.split("失敗したキーワード:\n", 2).last
+      assert_includes summary, 'コマンドが見つかりません'
+    end
+  end
+
+  def test_cli_skips_unavailable_program_and_continues_with_other_spelling
+    status, stdout, stderr = run_cli_with_fake_yt_dlp(<<~'RUBY', keywords: ['TM Network', 'TMNetwork'])
+      if ARGV.last.include?('key=TM+Network&')
+        STDERR.puts "\e[31mERROR: [RadikoTimeFree] JOAK-FM-20260904123000: This programme is not available. If this is an NHK station, you may wish to try NHK Radiru.\e[0m"
+        STDOUT.puts '[download] Finished downloading playlist: TM Network'
+        exit 1
+      end
+      STDOUT.puts 'TMNetwork downloaded'
+    RUBY
+
+    assert_equal 0, status
+    assert_includes stdout, 'TMNetwork downloaded'
+    assert_includes stdout, '処理が完了しました。'
+    assert_includes stderr, '警告: 取得不可の番組をスキップ:'
+    assert_includes stderr, '取得不可の番組 1件をスキップしました。'
+    refute_includes stderr, 'ERROR:'
+    refute_includes stderr, '失敗したキーワード:'
+  end
+
+  def test_cli_skips_expired_program
+    status, stdout, stderr = run_cli_with_fake_yt_dlp(<<~'RUBY')
+      STDERR.puts 'ERROR: [RadikoTimeFree] INT-20260101223000: Programme is no longer available.'
+      STDOUT.puts '[download] Finished downloading playlist: TM Network'
+      exit 1
+    RUBY
+
+    assert_equal 0, status
+    assert_includes stdout, '処理が完了しました。'
+    assert_includes stderr, '取得不可の番組 1件をスキップしました。'
+  end
+
+  def test_cli_preserves_real_failure_among_many_unavailable_programs
+    status, stdout, stderr = run_cli_with_fake_yt_dlp(<<~'RUBY')
+      STDERR.puts 'ERROR: [RadikoTimeFree] INT-20260909223000: Unable to download webpage: HTTP Error 500'
+      20.times do
+        STDERR.puts 'ERROR: [RadikoTimeFree] JOAK-FM-20260904123000: This programme is not available.'
+      end
+      STDOUT.puts '[download] Finished downloading playlist: TM Network'
+      exit 1
+    RUBY
+
+    assert_equal 1, status
+    refute_includes stdout, '処理が完了しました。'
+    summary = stderr.split("失敗したキーワード:\n", 2).last
+    assert_includes summary, 'HTTP Error 500'
+    assert_includes summary, '  - TM Network'
+  end
+
+  def test_cli_does_not_treat_aborted_or_unexpected_exit_as_an_unavailable_only_result
+    [
+      [1, false, nil],
+      [2, true, nil],
+      [1, true, 'Traceback (most recent call last):'],
+      [1, true, 'ERROR: unable to open for writing: Permission denied']
+    ].each do |exit_status, finished, extra_error|
+      source = <<~RUBY
+        STDERR.puts 'ERROR: [RadikoTimeFree] JOAK-FM-20260904123000: This programme is not available.'
+        STDERR.puts #{extra_error.inspect} if #{!extra_error.nil?}
+        STDOUT.puts '[download] Finished downloading playlist: TM Network' if #{finished}
+        exit #{exit_status}
+      RUBY
+      status, stdout, stderr = run_cli_with_fake_yt_dlp(source)
+
+      assert_equal 1, status
+      refute_includes stdout, '処理が完了しました。'
+      assert_includes stderr, '失敗したキーワード:'
+    end
+  end
+
   def test_cli_treats_empty_playlist_with_successful_exit_as_success
     stdout = StringIO.new
     stderr = StringIO.new
@@ -408,6 +570,29 @@ class PodcastDownloaderTest < Minitest::Test
   end
 
   private
+
+  def run_cli_with_fake_yt_dlp(source, keywords: ['TM Network'])
+    with_fake_yt_dlp(source) do |path|
+      stdout = StringIO.new
+      stderr = StringIO.new
+      status = PodcastDownloaderCLI.run(
+        config: default_config.merge('yt_dlp_path' => path),
+        keywords: keywords,
+        stdout: stdout,
+        stderr: stderr
+      )
+      [status, stdout.string, stderr.string]
+    end
+  end
+
+  def with_fake_yt_dlp(source)
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'fake-yt-dlp')
+      File.write(path, "#!#{RbConfig.ruby}\n" + source)
+      File.chmod(0o755, path)
+      yield path
+    end
+  end
 
   def parse_keyword(str)
     @downloader.send(:parse_keyword, str)

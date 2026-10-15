@@ -2,6 +2,7 @@
 
 require 'shellwords'
 require 'uri'
+require 'open3'
 require_relative 'lib/common'
 
 class PodcastDownloader
@@ -9,14 +10,16 @@ class PodcastDownloader
 
   DEFAULT_CONCURRENT_FRAGMENTS = 5
   REQUIRED_CONFIG_KEYS = %w[area_id audio_dir yt_dlp_path].freeze
+  MAX_DIAGNOSTIC_LINES = 10
+  MAX_LOG_LINE_BYTES = 4096
+  UNAVAILABLE_PROGRAM_ERROR = /\AERROR: \[RadikoTimeFree\] [\w-]+-\d{14}: (?:This programme is not available\.(?: If this is an NHK station, you may wish to try NHK Radiru\.)?|Programme is no longer available\.)\z/
 
-  attr_reader :failed_keywords
+  attr_reader :failures
 
   def initialize(config, keywords, command_runner: nil, stdout: $stdout, stderr: $stderr)
     @stdout = stdout
     @stderr = stderr
-    @uses_default_command_runner = command_runner.nil?
-    @command_runner = command_runner || ->(*command) { system(*command) }
+    @command_runner = command_runner || method(:run_command)
 
     validate_config(config)
     @keywords = validate_keywords(keywords)
@@ -24,12 +27,16 @@ class PodcastDownloader
     @audio_dir = config['audio_dir'].strip
     @yt_dlp_path = config['yt_dlp_path'].strip
     @concurrent_fragments = concurrent_fragments(config)
-    @failed_keywords = []
+    @failures = []
+  end
+
+  def failed_keywords
+    @failures.map { |failure| failure[:keyword] }
   end
 
   def download
     base_options = build_base_options
-    @failed_keywords = []
+    @failures = []
 
     @keywords.each do |keyword_str|
       @stdout.puts "検索キーワード: #{keyword_str}"
@@ -37,10 +44,16 @@ class PodcastDownloader
       search_url = build_search_url(search_key, station_id)
       command = build_command(search_url, base_options)
 
-      @failed_keywords << keyword_str unless execute_command(command)
+      unless execute_command(command)
+        @failures << {
+          keyword: keyword_str,
+          message: @failure_message,
+          details: @command_errors.empty? ? @command_tail : @command_errors
+        }
+      end
     end
 
-    @failed_keywords.empty?
+    @failures.empty?
   end
 
   private
@@ -120,6 +133,8 @@ class PodcastDownloader
       '-N', @concurrent_fragments.to_s,
       '--embed-metadata',
       '--playlist-reverse',
+      '--no-abort-on-error',
+      '--newline',
       '-P', @audio_dir,
     ]
   end
@@ -149,28 +164,88 @@ class PodcastDownloader
   end
 
   def execute_command(command)
+    @process_status = nil
+    @failure_message = nil
+    @command_errors = []
+    @command_tail = []
+    @unavailable_program_count = 0
+    @unexpected_error = false
+    @playlist_finished = false
     @stdout.puts "実行コマンド: #{command.map(&:shellescape).join(' ')}"
     @stdout.flush
     success = @command_runner.call(*command)
 
     if success.nil?
-      @stderr.puts "エラー: '#{@yt_dlp_path}' コマンドを実行できませんでした。パスを確認してください。"
-      return false
+      return command_failed("エラー: '#{@yt_dlp_path}' コマンドを実行できませんでした。パスを確認してください。")
     end
 
     return true if success
+    if @process_status&.exitstatus == 1 && @unavailable_program_count.positive? &&
+       !@unexpected_error && @playlist_finished
+      @stderr.puts "警告: 取得不可の番組 #{@unavailable_program_count}件をスキップしました。"
+      return true
+    end
 
-    process_status = @uses_default_command_runner ? $? : nil
-    exit_status = process_status&.exitstatus || 'unknown'
-    @stderr.puts "警告: コマンドの実行に失敗しました (終了ステータス: #{exit_status})"
-    false
+    status = if @process_status&.signaled?
+               "シグナル: #{@process_status.termsig}"
+             else
+               "終了ステータス: #{@process_status&.exitstatus || 'unknown'}"
+             end
+    command_failed("警告: コマンドの実行に失敗しました (#{status})")
   rescue Errno::ENOENT
-    @stderr.puts "エラー: '#{@yt_dlp_path}' コマンドが見つかりません。パスを確認してください。"
-    false
+    command_failed("エラー: '#{@yt_dlp_path}' コマンドが見つかりません。パスを確認してください。")
   rescue StandardError => e
-    @stderr.puts "エラー: コマンド実行中に予期せぬエラーが発生しました: #{e.message}"
+    command_failed("エラー: コマンド実行中に予期せぬエラーが発生しました: #{e.message}")
     @stderr.puts Array(e.backtrace).join("\n")
     false
+  end
+
+  def command_failed(message)
+    @failure_message = message
+    @stderr.puts message
+    false
+  end
+
+  def run_command(*command)
+    Open3.popen3(*command) do |stdin, stdout, stderr, wait_thread|
+      stdin.close
+      output_lock = Mutex.new
+      readers = [[stdout, @stdout], [stderr, @stderr]].map do |source, destination|
+        Thread.new do
+          source.each_line(MAX_LOG_LINE_BYTES) do |line|
+            output_lock.synchronize do
+              destination.print(remember_output(line))
+              destination.flush
+            end
+          end
+        end
+      end
+      readers.each(&:value)
+      @process_status = wait_thread.value
+      @process_status.success?
+    end
+  end
+
+  def remember_output(line)
+    # Keep diagnostics bounded even when a download produces a long progress log.
+    text = line.scrub.gsub(/\e\[[0-?]*[ -\/]*[@-~]/, '').strip
+    return line if text.empty?
+
+    @playlist_finished ||= text.start_with?('[download] Finished downloading playlist: ')
+    if text.match?(UNAVAILABLE_PROGRAM_ERROR)
+      @unavailable_program_count += 1
+      line = "警告: 取得不可の番組をスキップ: #{text.delete_prefix('ERROR: ')}\n"
+      text = line.strip
+    elsif text.match?(/\bERROR:|エラー:|\ATraceback \(most recent call last\):/i)
+      # Track every failure, including errors that fall out of the bounded log.
+      @unexpected_error = true
+      @command_errors << text
+      @command_errors.shift if @command_errors.length > MAX_DIAGNOSTIC_LINES
+    end
+
+    @command_tail << text
+    @command_tail.shift if @command_tail.length > MAX_DIAGNOSTIC_LINES
+    line
   end
 end
 
@@ -192,8 +267,11 @@ module PodcastDownloaderCLI
     else
       stderr.puts 'エラー: 一部のダウンロードに失敗しました。'
       stderr.puts '失敗したキーワード:'
-      downloader.failed_keywords.each { |keyword| stderr.puts "  - #{keyword}" }
-      stderr.puts '各キーワードのログにある ERROR: または警告・エラーを確認してください。'
+      downloader.failures.each do |failure|
+        stderr.puts "  - #{failure[:keyword]}"
+        stderr.puts "    #{failure[:message]}"
+        failure[:details].each { |line| stderr.puts "    #{line}" }
+      end
       1
     end
   rescue PodcastDownloader::ConfigurationError => e
