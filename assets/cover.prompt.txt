@@ -1,0 +1,13 @@
+Generated with the built-in ImageGen tool.
+Source: 1254 x 1254 RGB PNG.
+Export: 3000 x 3000 RGB JPEG, resized with macOS sips, quality 90.
+
+Use case: logo-brand.
+Asset type: finished square podcast cover image, exactly 3000 x 3000 pixels, opaque RGB PNG.
+Primary request: A very simple, clean typographic podcast cover with the exact title "kdmsnr local podcast".
+Composition: Fill the entire square with a plain solid off-white background. A generously spaced, centered block of large bold black sans-serif lowercase type, set on three lines, with ample equal outer margins. The three lines must read exactly:
+kdmsnr
+local
+podcast
+Make the first line large enough to remain easily readable at small podcast thumbnail sizes; balance all three lines into one calm, clear typographic composition.
+Constraints: Only the exact three words above. Spell kdmsnr exactly k-d-m-s-n-r. No other text, no logo symbols, no icons, no illustration, no border, no gradients, no shadows, no texture, no mockup, no watermark. Flat cover artwork only; square, crisp type edges, no transparency.

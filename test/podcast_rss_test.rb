@@ -75,6 +75,89 @@ class PodcastRssTest < Minitest::Test
     end
   end
 
+  def test_generate_omits_artwork_when_channel_image_is_unconfigured_or_null
+    [{}, { 'channel_image' => nil }].each do |image_config|
+      Dir.mktmpdir do |dir|
+        rss_file = File.join(dir, 'rss.xml')
+        config = base_config(dir, rss_file).merge(image_config)
+
+        assert RssGenerator.new(config, out: StringIO.new).generate
+
+        rss = RSS::Parser.parse(File.read(rss_file), false)
+        assert_nil rss.channel.itunes_image
+        assert_nil rss.image
+      end
+    end
+  end
+
+  def test_generate_sets_itunes_and_rss_artwork_with_unescaped_values
+    Dir.mktmpdir do |dir|
+      rss_file = File.join(dir, 'rss.xml')
+      image_url = 'https://example.com/cover.jpg?size=large&version=2'
+      channel_link = 'https://example.com/podcast?show=rock&lang=ja'
+      config = base_config(dir, rss_file).merge(
+        'channel_image' => "  #{image_url}\n",
+        'channel_title' => 'Rock & Roll <Live>',
+        'channel_link' => channel_link
+      )
+
+      assert RssGenerator.new(config, out: StringIO.new).generate
+
+      rss = RSS::Parser.parse(File.read(rss_file), false)
+      assert_equal image_url, rss.channel.itunes_image.href
+      assert_equal image_url, rss.image.url
+      assert_equal 'Rock & Roll <Live>', rss.image.title
+      assert_equal channel_link, rss.image.link
+    end
+  end
+
+  def test_generate_maps_a_local_channel_image_to_an_escaped_public_url
+    Dir.mktmpdir do |dir|
+      rss_file = File.join(dir, 'rss.xml')
+      image_path = './unused/../art work/cover & % # ? あ.jpg'
+      config = base_config(dir, rss_file).merge(
+        'base_url' => ' https://example.com/podcast/ ',
+        'channel_image' => image_path
+      )
+
+      assert RssGenerator.new(config, out: StringIO.new).generate
+
+      rss = RSS::Parser.parse(File.read(rss_file), false)
+      expected_url = 'https://example.com/podcast/art%20work/cover%20%26%20%25%20%23%20%3F%20%E3%81%82.jpg'
+      assert_equal expected_url, rss.channel.itunes_image.href
+      assert_equal expected_url, rss.image.url
+      refute File.exist?(File.expand_path(image_path, dir))
+      assert_equal ['rss.xml'], Dir.children(dir)
+    end
+  end
+
+  def test_generate_resolves_relative_and_absolute_channel_images_inside_audio_dir
+    Dir.mktmpdir do |dir|
+      audio_dir = File.join(dir, 'audio')
+      working_dir = File.join(dir, 'elsewhere')
+      FileUtils.mkdir_p([audio_dir, working_dir])
+      rss_file = File.join(dir, 'rss.xml')
+      images = {
+        ' cover.jpg ' => 'cover.jpg',
+        './art/../cover.jpg' => 'cover.jpg',
+        File.join(audio_dir, 'art', '.', 'cover.jpg') => 'art/cover.jpg'
+      }
+
+      Dir.chdir(working_dir) do
+        images.each do |image, public_path|
+          config = base_config(audio_dir, rss_file).merge('channel_image' => image)
+
+          assert RssGenerator.new(config, out: StringIO.new).generate
+
+          rss = RSS::Parser.parse(File.read(rss_file), false)
+          expected_url = "http://example.com/files/#{public_path}"
+          assert_equal expected_url, rss.channel.itunes_image.href, image
+          assert_equal expected_url, rss.image.url, image
+        end
+      end
+    end
+  end
+
   def test_generate_with_match_filters_items
     Dir.mktmpdir do |dir|
       audio_dir = File.join(dir, 'audio')
@@ -287,6 +370,43 @@ class PodcastRssTest < Minitest::Test
     assert_match(/channel_link.*HTTP\(S\) URL/, error.message)
   end
 
+  def test_config_resolver_rejects_invalid_channel_images
+    invalid_images = [
+      '', ' ', 123, true, [], {},
+      '/cover.jpg', 'file:///tmp/cover.jpg', 'ftp://example.com/cover.jpg',
+      'javascript:alert(1)', 'data:image/png;base64,AAAA',
+      'https://', 'http://[invalid', 'https://example.com/cover image.jpg'
+    ]
+
+    invalid_images.each do |image|
+      config = base_config('/tmp/audio', '/tmp/rss.xml').merge('channel_image' => image)
+
+      error = assert_raises(RssConfigResolver::Error, "channel_image: #{image.inspect}") do
+        RssConfigResolver.resolve(config)
+      end
+
+      assert_match(/channel_image/, error.message, "channel_image: #{image.inspect}")
+    end
+  end
+
+  def test_config_resolver_rejects_channel_image_paths_outside_audio_dir_or_pointing_to_it
+    audio_dir = '/tmp/audio'
+    invalid_paths = [
+      '../cover.jpg', 'art/../../cover.jpg', '/tmp/audio-other/cover.jpg',
+      '/tmp/cover.jpg', '.', './', 'art/..', audio_dir, "#{audio_dir}/"
+    ]
+
+    invalid_paths.each do |image|
+      config = base_config(audio_dir, '/tmp/rss.xml').merge('channel_image' => image)
+
+      error = assert_raises(RssConfigResolver::Error, "channel_image: #{image.inspect}") do
+        RssConfigResolver.resolve(config)
+      end
+
+      assert_match(/channel_image/, error.message, "channel_image: #{image.inspect}")
+    end
+  end
+
   def test_runner_generates_multiple_filtered_feeds
     Dir.mktmpdir do |dir|
       audio_dir = File.join(dir, 'audio')
@@ -316,6 +436,85 @@ class PodcastRssTest < Minitest::Test
       assert_equal 'Music Feed', music_rss.channel.title
       assert_equal ['Music'], music_rss.items.map(&:title)
       refute File.exist?(default_rss_file)
+    end
+  end
+
+  def test_runner_inherits_overrides_and_disables_channel_images_per_feed
+    Dir.mktmpdir do |dir|
+      inherited_rss_file = File.join(dir, 'inherited.xml')
+      overridden_rss_file = File.join(dir, 'overridden.xml')
+      disabled_rss_file = File.join(dir, 'disabled.xml')
+      inherited_image_url = 'http://example.com/default.jpg'
+      overridden_image_url = 'https://example.com/other.jpg?size=large&version=2'
+      config = base_config(dir, File.join(dir, 'default.xml')).merge(
+        'channel_image' => inherited_image_url,
+        'feeds' => [
+          { 'rss_file' => inherited_rss_file },
+          {
+            'rss_file' => overridden_rss_file,
+            'channel_title' => 'Other Podcast',
+            'channel_link' => 'https://example.com/other',
+            'channel_image' => " #{overridden_image_url} "
+          },
+          { 'rss_file' => disabled_rss_file, 'channel_image' => nil }
+        ]
+      )
+
+      assert RssRunner.new(config, out: StringIO.new).run
+
+      inherited = RSS::Parser.parse(File.read(inherited_rss_file), false)
+      overridden = RSS::Parser.parse(File.read(overridden_rss_file), false)
+      disabled = RSS::Parser.parse(File.read(disabled_rss_file), false)
+      assert_equal inherited_image_url, inherited.channel.itunes_image.href
+      assert_equal inherited_image_url, inherited.image.url
+      assert_equal 'My Podcast', inherited.image.title
+      assert_equal 'http://example.com', inherited.image.link
+      assert_equal overridden_image_url, overridden.channel.itunes_image.href
+      assert_equal overridden_image_url, overridden.image.url
+      assert_equal 'Other Podcast', overridden.image.title
+      assert_equal 'https://example.com/other', overridden.image.link
+      assert_nil disabled.channel.itunes_image
+      assert_nil disabled.image
+    end
+  end
+
+  def test_runner_resolves_inherited_local_channel_images_for_each_feed
+    Dir.mktmpdir do |dir|
+      default_audio_dir = File.join(dir, 'audio')
+      other_audio_dir = File.join(dir, 'other-audio')
+      FileUtils.mkdir_p([default_audio_dir, other_audio_dir])
+      default_rss_file = File.join(dir, 'default.xml')
+      other_rss_file = File.join(dir, 'other.xml')
+      overridden_rss_file = File.join(dir, 'overridden.xml')
+      config = base_config(default_audio_dir, File.join(dir, 'unused.xml')).merge(
+        'channel_image' => 'cover.jpg',
+        'feeds' => [
+          { 'rss_file' => default_rss_file },
+          {
+            'rss_file' => other_rss_file,
+            'audio_dir' => other_audio_dir,
+            'base_url' => 'https://example.org/other/'
+          },
+          {
+            'rss_file' => overridden_rss_file,
+            'audio_dir' => other_audio_dir,
+            'base_url' => 'https://example.org/another',
+            'channel_image' => './art/other cover.jpg'
+          }
+        ]
+      )
+
+      assert RssRunner.new(config, out: StringIO.new).run
+
+      {
+        default_rss_file => 'http://example.com/files/cover.jpg',
+        other_rss_file => 'https://example.org/other/cover.jpg',
+        overridden_rss_file => 'https://example.org/another/art/other%20cover.jpg'
+      }.each do |rss_file, expected_url|
+        rss = RSS::Parser.parse(File.read(rss_file), false)
+        assert_equal expected_url, rss.channel.itunes_image.href
+        assert_equal expected_url, rss.image.url
+      end
     end
   end
 

@@ -13,6 +13,7 @@
 - `bundle install`を実行します
 - config.ymlを設定します
   - `concurrent_fragments` はyt-dlpが同時取得するフラグメント数です（省略時は5、番組の取得件数ではありません）
+  - カバー画像は `channel_image` にHTTP(S) URL、または `audio_dir` 内のパスを指定します（[設定例](config.sample.yml)）
   - RSSを複数出力したい場合は `feeds` を使います（`match` でファイル名を絞り込み）
     - `match` は文字列 or `/正規表現/` を指定でき、配列で複数指定可能
 - podcast_keywords.ymlに録音したいキーワードを記入します
@@ -33,6 +34,27 @@ bundle exec ruby podcast_dl.rb
 bundle exec ruby podcast_rss.rb
 bundle exec ruby podcast_delete.rb
 ```
+
+カバー画像を音声ファイルと同じディレクトリに置く場合は、`channel_image` にファイル名を指定します。
+付属の [カバー画像](assets/cover.jpg) を使う場合は、`audio_dir` で指定したディレクトリにコピーしてください。
+画像は3000×3000pxの透過なしJPEGです。
+これは [Apple Podcastsの推奨サイズ](https://podcasters.apple.com/support/5514-show-cover-template) に合わせています。
+
+```yaml
+audio_dir: "/var/www/html/podcast/files"
+base_url: "http://raspberrypi.local/podcast/files/"
+channel_image: "cover.jpg"
+```
+
+相対パスは `audio_dir` を基準に解決します。
+`/var/www/html/podcast/files/cover.jpg` のような絶対パスも指定できます。
+パスで指定する画像は `audio_dir` 内に置いてください。
+`podcast_rss.rb` を実行すると、`base_url` と画像の相対パスからURLを組み立て、RSSの `<itunes:image>` と `<image>` に出力します。
+上の設定では `http://raspberrypi.local/podcast/files/cover.jpg` になります。
+HTTP(S) URLを直接指定することもできます。
+
+`feeds` を使う場合は共通設定を引き継ぎ、各フィードの `channel_image` で上書きできます。
+`channel_image: null` を指定したフィードには画像を出力しません。
 
 cronからも、リポジトリへ移動して `bundle exec ruby ...` の形で実行してください。各スクリプトは一部でも処理に失敗すると終了コード1を返します。
 

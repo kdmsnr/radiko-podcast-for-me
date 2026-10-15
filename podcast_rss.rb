@@ -44,7 +44,34 @@ class RssConfigResolver
       normalize_matchers(config['match'], label: "#{label}.match") if config.key?('match')
       validate_http_url!(config['base_url'], "#{label}のbase_url", allow_query_or_fragment: false)
       validate_http_url!(config['channel_link'], "#{label}のchannel_link")
+      channel_image_url(config, label: label)
       config
+    end
+
+    def channel_image_url(config, label: '設定ファイル')
+      return nil if config['channel_image'].nil?
+
+      validate_required!(config, %w[channel_image], label)
+      image = config['channel_image'].strip
+      if image.match?(/\A[a-z][a-z0-9+.-]*:/i)
+        validate_http_url!(image, "#{label}のchannel_image")
+        return image
+      end
+
+      directory_prefix = File.join(File.expand_path(config['audio_dir'].strip), '')
+      image_path = File.expand_path(image, directory_prefix)
+      unless image_path.start_with?(directory_prefix) && image_path != directory_prefix
+        raise Error, "#{label}のchannel_image はaudio_dir内の画像パスで指定してください"
+      end
+
+      relative_path = image_path.delete_prefix(directory_prefix)
+      escaped_path = relative_path.split(File::SEPARATOR).map do |segment|
+        URI::DEFAULT_PARSER.escape(segment, /[^a-zA-Z0-9\-._~]/)
+      end.join('/')
+      base_url = config['base_url'].strip.chomp('/') + '/'
+      URI.join(base_url, escaped_path).to_s
+    rescue ArgumentError => e
+      raise Error, "#{label}のchannel_image のパスが無効です: #{e.message}"
     end
 
     def normalize_matchers(matchers, label: 'match')
@@ -196,6 +223,13 @@ class RssGenerator
     maker.channel.link = xml_text(@config['channel_link'].strip)
     maker.channel.description = xml_text(@config['channel_description'])
     maker.channel.language = xml_text(@config.fetch('channel_language', 'ja'))
+
+    if (image_url = RssConfigResolver.channel_image_url(@config))
+      image_url = xml_text(image_url)
+      maker.channel.itunes_image = image_url
+      maker.image.url = image_url
+      maker.image.title = maker.channel.title
+    end
   end
 
   def add_items(maker)

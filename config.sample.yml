@@ -9,6 +9,9 @@ base_url: "http://raspberrypi.local/podcast/files/"
 channel_title: "kdmsnr local podcast"
 channel_link: "http://raspberrypi.local"
 channel_description: "Podcast description"
+# カバー画像のHTTP(S) URL、またはaudio_dir内のパス（省略時は画像なし）
+# 相対パスはaudio_dirを基準に解決します
+# channel_image: "cover.jpg"
 expire_month: 6
 # true にすると非表示ファイルを除く全形式が削除対象になります（省略時は .mp3 / .m4a のみ）
 # delete_all_files: true
@@ -23,9 +26,11 @@ expire_month: 6
 #     channel_title: "News Podcast"
 #     channel_link: "http://raspberrypi.local"
 #     channel_description: "News description"
+#     channel_image: "news-cover.jpg"
 #   - name: "music"
 #     rss_file: "/var/www/html/podcast/music.xml"
 #     match: "/MUSIC_/"
 #     channel_title: "Music Podcast"
 #     channel_link: "http://raspberrypi.local"
 #     channel_description: "Music description"
+#     channel_image: "music-cover.jpg"
