@@ -5,6 +5,7 @@ require 'uri'
 require 'open3'
 require 'fileutils'
 require 'tempfile'
+require 'rbconfig'
 require_relative 'lib/common'
 
 class PodcastDownloader
@@ -15,12 +16,13 @@ class PodcastDownloader
   MAX_DIAGNOSTIC_LINES = 10
   MAX_LOG_LINE_BYTES = 4096
   WORK_DIR_NAME = '.podcast-downloads'
+  DEFAULT_WORK_DIR = File.join(__dir__, WORK_DIR_NAME)
   PUBLISHED_PROGRAM_PATTERN = /\[([a-z0-9_-]+-\d{14})\]\.(?:mp3|m4a)\z/i
   UNAVAILABLE_PROGRAM_ERROR = /\AERROR: \[RadikoTimeFree\] [\w-]+-\d{14}: (?:This programme is not available\.(?: If this is an NHK station, you may wish to try NHK Radiru\.)?|Programme is no longer available\.)\z/
 
   attr_reader :failures
 
-  def initialize(config, keywords, command_runner: nil, stdout: $stdout, stderr: $stderr)
+  def initialize(config, keywords, command_runner: nil, work_dir: DEFAULT_WORK_DIR, stdout: $stdout, stderr: $stderr)
     @stdout = stdout
     @stderr = stderr
     @command_runner = command_runner || method(:run_command)
@@ -29,6 +31,7 @@ class PodcastDownloader
     @keywords = validate_keywords(keywords)
     @area_id = config['area_id'].strip
     @audio_dir = config['audio_dir'].strip
+    @work_dir = File.expand_path(work_dir)
     @yt_dlp_path = config['yt_dlp_path'].strip
     @concurrent_fragments = concurrent_fragments(config)
     @failures = []
@@ -41,18 +44,19 @@ class PodcastDownloader
   def download
     @failures = []
     FileUtils.mkdir_p(@audio_dir)
-    work_dir = File.join(@audio_dir, WORK_DIR_NAME)
-    FileUtils.mkdir_p(work_dir, mode: 0o700)
+    FileUtils.mkdir_p(@work_dir, mode: 0o700)
 
-    File.open(File.join(work_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
+    File.open(File.join(@work_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
       unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         return download_setup_failed('別のダウンロード処理が実行中です。')
       end
 
-      Tempfile.create(['download-archive-', '.txt'], work_dir) do |archive|
+      migrate_old_work_dir
+
+      Tempfile.create(['download-archive-', '.txt'], @work_dir) do |archive|
         published_program_ids.each { |id| archive.puts "radikotimefree #{id}" }
         archive.flush
-        download_keywords(build_base_options(work_dir: work_dir, archive_path: archive.path))
+        download_keywords(build_base_options(work_dir: @work_dir, archive_path: archive.path))
       end
     end
   rescue SystemCallError, IOError => e
@@ -74,6 +78,30 @@ class PodcastDownloader
 
       match[1]
     end.uniq
+  end
+
+  def migrate_old_work_dir
+    old_dir = File.join(File.expand_path(@audio_dir), WORK_DIR_NAME)
+    return if old_dir == @work_dir || !Dir.exist?(old_dir)
+
+    File.open(File.join(old_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
+      raise IOError, '以前の作業ディレクトリを使用中です' unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+      Dir.each_child(old_dir) do |name|
+        next if name == 'download.lock' || name.start_with?('download-archive-')
+
+        source = File.join(old_dir, name)
+        target = File.join(@work_dir, name)
+        raise IOError, "以前の作業ファイルの移動先が既に存在します: #{target}" if File.exist?(target)
+        raise IOError, "以前の作業ファイルを移動できません: #{source}" unless File.file?(source) && !File.symlink?(source)
+
+        Tempfile.create(['migrating-', '.tmp'], @work_dir) do |temp|
+          FileUtils.copy_file(source, temp.path, true)
+          File.link(temp.path, target)
+          File.unlink(source)
+        end
+      end
+    end
   end
 
   def download_keywords(base_options)
@@ -164,7 +192,8 @@ class PodcastDownloader
     raise ConfigurationError, "'#{key}' は正の整数で指定してください（現在値: #{value.inspect}）。"
   end
 
-  def build_base_options(work_dir: File.join(@audio_dir, WORK_DIR_NAME), archive_path: nil)
+  def build_base_options(work_dir: @work_dir, archive_path: nil)
+    publish_command = Shellwords.join([RbConfig.ruby, File.join(__dir__, 'lib', 'audio_publisher.rb'), File.expand_path(@audio_dir)])
     options = [
       '-x',
       '-N', @concurrent_fragments.to_s,
@@ -174,9 +203,10 @@ class PodcastDownloader
       '--playlist-reverse',
       '--no-abort-on-error',
       '--newline',
-      '-P', "home:#{@audio_dir}",
+      '-P', "home:#{work_dir}",
       '-P', "temp:#{work_dir}",
       '-o', '%(title)s [%(id)s].%(ext)s',
+      '--exec', "after_move:#{publish_command} %(filepath)q",
     ]
     options.concat(['--download-archive', archive_path]) if archive_path
     options
@@ -295,11 +325,12 @@ end
 module PodcastDownloaderCLI
   module_function
 
-  def run(config:, keywords:, command_runner: nil, stdout: $stdout, stderr: $stderr)
+  def run(config:, keywords:, command_runner: nil, work_dir: PodcastDownloader::DEFAULT_WORK_DIR, stdout: $stdout, stderr: $stderr)
     downloader = PodcastDownloader.new(
       config,
       keywords,
       command_runner: command_runner,
+      work_dir: work_dir,
       stdout: stdout,
       stderr: stderr
     )
@@ -326,6 +357,7 @@ module PodcastDownloaderCLI
     config_path:,
     keywords_path:,
     command_runner: nil,
+    work_dir: PodcastDownloader::DEFAULT_WORK_DIR,
     stdout: $stdout,
     stderr: $stderr
   )
@@ -335,6 +367,7 @@ module PodcastDownloaderCLI
       config: config,
       keywords: keywords,
       command_runner: command_runner,
+      work_dir: work_dir,
       stdout: stdout,
       stderr: stderr
     )

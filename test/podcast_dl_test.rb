@@ -7,6 +7,7 @@ require_relative '../podcast_dl'
 class PodcastDownloaderTest < Minitest::Test
   def setup
     @test_dir = Dir.mktmpdir
+    @work_dir = File.join(@test_dir, '.podcast-downloads')
     @downloader = build_downloader
   end
 
@@ -86,14 +87,15 @@ class PodcastDownloaderTest < Minitest::Test
           command = args
           archive_path = option_value(args, '--download-archive')
           archive_lines = File.readlines(archive_path, chomp: true)
-          assert Dir.exist?(File.join(audio_dir, '.podcast-downloads'))
+          assert Dir.exist?(@work_dir)
           true
         end
       )
 
       assert downloader.download
-      assert_includes option_values(command, '-P'), "home:#{audio_dir}"
-      assert_includes option_values(command, '-P'), "temp:#{File.join(audio_dir, '.podcast-downloads')}"
+      assert_includes option_values(command, '-P'), "home:#{@work_dir}"
+      assert_includes option_values(command, '-P'), "temp:#{@work_dir}"
+      assert option_values(command, '--exec').any? { |value| value.start_with?('after_move:') }
       assert_includes command, '--abort-on-unavailable-fragments'
       assert_includes archive_lines, 'radikotimefree LFR-20260102123456'
       assert_includes archive_lines, 'radikotimefree JOAK-FM-20260103123456'
@@ -141,18 +143,17 @@ class PodcastDownloaderTest < Minitest::Test
         archive_path = option_value(args, '--download-archive')
         archive_paths << archive_path
         archive = File.readlines(archive_path, chomp: true)
-        home = option_values(args, '-P').find { |value| value.start_with?('home:') }.delete_prefix('home:')
         temp = option_values(args, '-P').find { |value| value.start_with?('temp:') }.delete_prefix('temp:')
         invocations << archive
         unless archive.include?(failed_id)
           staged = File.join(temp, failed_name)
           File.write(staged, 'downloaded audio') unless File.exist?(staged)
-          File.rename(staged, File.join(home, failed_name)) if run_number > 1
+          File.rename(staged, File.join(dir, failed_name)) if run_number > 1
         end
         unless archive.include?(success_id)
           staged = File.join(temp, success_name)
           File.write(staged, 'complete audio')
-          File.rename(staged, File.join(home, success_name))
+          File.rename(staged, File.join(dir, success_name))
           File.open(archive_path, 'a') { |file| file.puts success_id }
         end
         run_number > 1
@@ -161,7 +162,7 @@ class PodcastDownloaderTest < Minitest::Test
 
       refute downloader.download
       refute File.exist?(archive_paths.last)
-      assert File.exist?(File.join(dir, '.podcast-downloads', failed_name))
+      assert File.exist?(File.join(@work_dir, failed_name))
       refute File.exist?(File.join(dir, failed_name))
       assert File.exist?(File.join(dir, success_name))
       assert downloader.download
@@ -198,7 +199,7 @@ class PodcastDownloaderTest < Minitest::Test
 
   def test_download_fails_cleanly_when_work_directory_cannot_be_created
     Dir.mktmpdir do |dir|
-      File.write(File.join(dir, '.podcast-downloads'), 'not a directory')
+      File.write(@work_dir, 'not a directory')
       stderr = StringIO.new
       downloader = build_downloader(
         config: default_config.merge('audio_dir' => dir),
@@ -213,9 +214,8 @@ class PodcastDownloaderTest < Minitest::Test
 
   def test_download_rejects_overlapping_runs_without_invoking_yt_dlp
     Dir.mktmpdir do |dir|
-      work_dir = File.join(dir, '.podcast-downloads')
-      Dir.mkdir(work_dir)
-      File.open(File.join(work_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
+      Dir.mkdir(@work_dir)
+      File.open(File.join(@work_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
         assert lock.flock(File::LOCK_EX | File::LOCK_NB)
         stderr = StringIO.new
         downloader = build_downloader(
@@ -420,7 +420,7 @@ class PodcastDownloaderTest < Minitest::Test
 
       assert downloader.download
       assert_equal '/usr/local/bin/yt-dlp', command.first
-      assert_includes option_values(command, '-P'), "home:#{dir}"
+      assert_includes option_values(command, '-P'), "home:#{@work_dir}"
       assert_includes downloader.send(:build_search_url, 'show', nil), 'area_id=JP13'
     end
   end
@@ -430,6 +430,7 @@ class PodcastDownloaderTest < Minitest::Test
     stderr = StringIO.new
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: default_config,
       keywords: ['foo'],
       command_runner: ->(*_command) { true },
@@ -447,6 +448,7 @@ class PodcastDownloaderTest < Minitest::Test
     stderr = StringIO.new
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: default_config,
       keywords: ['foo'],
       command_runner: ->(*_command) { false },
@@ -465,6 +467,7 @@ class PodcastDownloaderTest < Minitest::Test
     config = default_config.merge('yt_dlp_path' => '/usr/bin/false')
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: config,
       keywords: ['foo'],
       stdout: StringIO.new,
@@ -489,6 +492,7 @@ class PodcastDownloaderTest < Minitest::Test
     end
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: default_config,
       keywords: ['failed&station_id=LFR', 'empty'],
       command_runner: runner,
@@ -522,6 +526,7 @@ class PodcastDownloaderTest < Minitest::Test
       stdout = StringIO.new
       stderr = StringIO.new
       status = PodcastDownloaderCLI.run(
+        work_dir: @work_dir,
         config: default_config.merge('yt_dlp_path' => path),
         keywords: ['TM Network', 'TMNetwork'],
         stdout: stdout,
@@ -550,6 +555,7 @@ class PodcastDownloaderTest < Minitest::Test
     RUBY
       stderr = StringIO.new
       status = PodcastDownloaderCLI.run(
+        work_dir: @work_dir,
         config: default_config.merge('yt_dlp_path' => path),
         keywords: ['TM Network'],
         stdout: StringIO.new,
@@ -569,6 +575,7 @@ class PodcastDownloaderTest < Minitest::Test
     Dir.mktmpdir do |dir|
       stderr = StringIO.new
       status = PodcastDownloaderCLI.run(
+        work_dir: @work_dir,
         config: default_config.merge('yt_dlp_path' => File.join(dir, 'missing')),
         keywords: ['TM Network'],
         stdout: StringIO.new,
@@ -659,6 +666,7 @@ class PodcastDownloaderTest < Minitest::Test
     end
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: default_config,
       keywords: ['empty'],
       command_runner: runner,
@@ -675,6 +683,7 @@ class PodcastDownloaderTest < Minitest::Test
     stderr = StringIO.new
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: default_config,
       keywords: nil,
       command_runner: ->(*_command) { true },
@@ -691,6 +700,7 @@ class PodcastDownloaderTest < Minitest::Test
     stderr = StringIO.new
 
     status = PodcastDownloaderCLI.run(
+      work_dir: @work_dir,
       config: default_config,
       keywords: [],
       command_runner: ->(*_command) { flunk 'command should not be called' },
@@ -712,6 +722,7 @@ class PodcastDownloaderTest < Minitest::Test
       commands = []
 
       status = PodcastDownloaderCLI.run_from_files(
+        work_dir: @work_dir,
         config_path: config_path,
         keywords_path: keywords_path,
         command_runner: ->(*command) { commands << command; true },
@@ -729,6 +740,7 @@ class PodcastDownloaderTest < Minitest::Test
       stderr = StringIO.new
 
       status = PodcastDownloaderCLI.run_from_files(
+        work_dir: @work_dir,
         config_path: File.join(dir, 'missing.yml'),
         keywords_path: File.join(dir, 'keywords.yml'),
         stdout: StringIO.new,
@@ -747,6 +759,7 @@ class PodcastDownloaderTest < Minitest::Test
       stdout = StringIO.new
       stderr = StringIO.new
       status = PodcastDownloaderCLI.run(
+        work_dir: @work_dir,
         config: default_config.merge('yt_dlp_path' => path),
         keywords: keywords,
         stdout: stdout,
@@ -773,6 +786,7 @@ class PodcastDownloaderTest < Minitest::Test
     config: default_config,
     keywords: ['keyword'],
     command_runner: ->(*_command) { true },
+    work_dir: @work_dir,
     stdout: StringIO.new,
     stderr: StringIO.new
   )
@@ -780,6 +794,7 @@ class PodcastDownloaderTest < Minitest::Test
       config,
       keywords,
       command_runner: command_runner,
+      work_dir: work_dir,
       stdout: stdout,
       stderr: stderr
     )
