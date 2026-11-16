@@ -12,7 +12,7 @@
   - `brew install exiftool` or `sudo apt install exiftool`
 - `bundle install`を実行します
 - config.ymlを設定します
-  - `concurrent_fragments` はyt-dlpが同時取得するフラグメント数です（省略時は5、番組の取得件数ではありません）
+  - `concurrent_fragments` はyt-dlpが同時取得するフラグメント数です（省略時は1、番組の取得件数ではありません）
   - カバー画像は `channel_image` にHTTP(S) URL、または `audio_dir` 内のパスを指定します（[設定例](config.sample.yml)）
   - RSSを複数出力したい場合は `feeds` を使います（`match` でファイル名を絞り込み）
     - `match` は文字列 or `/正規表現/` を指定でき、配列で複数指定可能
@@ -21,6 +21,11 @@
     - See: [radikoの放送局一覧を取得してみよう　radiko api - Qiita](https://qiita.com/miyama_daily/items/87c7694a10c36a11a96c)
 - スクリプトを実行します
   - podcast_dl.rb はファイルをダウンロードします
+    - `audio_dir/.podcast-downloads` で取得とメタデータの書き込みを行い、両方が成功した音声を `audio_dir` の直下に移動します
+    - 失敗した音声は作業ディレクトリに残り、番組を再取得できる間は次回の実行で再試行します
+    - 公開済みの音声はファイル名末尾の `[放送局ID-放送開始日時]` から判定し、再処理しません。ファイルを削除した場合は次回の取得対象になります
+    - ファイル名は `番組名 [番組ID].拡張子` の形式です。独自のファイル名に変更した既存の音声は公開済みと判定できない場合があります
+    - ウェブサーバーでは作業ディレクトリへのアクセスを禁止してください
   - podcast_rss.rb はダウンロードしたファイルからrss.xmlを生成します
     - 音声ファイルが見つかったのに有効なRSSアイテムを1件も生成できない場合、既存のRSSは保持されます
     - 安全に置き換えるため、RSS出力先ディレクトリには一時ファイルの作成とrenameの権限が必要です

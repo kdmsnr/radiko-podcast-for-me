@@ -6,7 +6,12 @@ require_relative '../podcast_dl'
 
 class PodcastDownloaderTest < Minitest::Test
   def setup
+    @test_dir = Dir.mktmpdir
     @downloader = build_downloader
+  end
+
+  def teardown
+    FileUtils.remove_entry(@test_dir)
   end
 
   def test_parse_keyword_with_station_id_suffix
@@ -63,9 +68,171 @@ class PodcastDownloaderTest < Minitest::Test
     assert_includes command, '--embed-metadata'
   end
 
+  def test_download_stages_audio_and_uses_temporary_archive_of_published_programs
+    Dir.mktmpdir do |parent|
+      audio_dir = File.join(parent, "音声 & [番組]'s")
+      Dir.mkdir(audio_dir)
+      File.write(File.join(audio_dir, '番組名 [LFR-20260102123456].m4a'), 'published')
+      File.write(File.join(audio_dir, '別番組 [JOAK-FM-20260103123456].mp3'), 'published')
+      File.write(File.join(audio_dir, '中途半端 [LFR-20260104123456].m4a.part'), 'partial')
+      File.write(File.join(audio_dir, '画像 [LFR-20260105123456].jpg'), 'image')
+      archive_path = nil
+      archive_lines = nil
+      command = nil
+
+      downloader = build_downloader(
+        config: default_config.merge('audio_dir' => audio_dir),
+        command_runner: lambda do |*args|
+          command = args
+          archive_path = option_value(args, '--download-archive')
+          archive_lines = File.readlines(archive_path, chomp: true)
+          assert Dir.exist?(File.join(audio_dir, '.podcast-downloads'))
+          true
+        end
+      )
+
+      assert downloader.download
+      assert_includes option_values(command, '-P'), "home:#{audio_dir}"
+      assert_includes option_values(command, '-P'), "temp:#{File.join(audio_dir, '.podcast-downloads')}"
+      assert_includes command, '--abort-on-unavailable-fragments'
+      assert_includes archive_lines, 'radikotimefree LFR-20260102123456'
+      assert_includes archive_lines, 'radikotimefree JOAK-FM-20260103123456'
+      refute_includes archive_lines, 'radikotimefree LFR-20260104123456'
+      refute_includes archive_lines, 'radikotimefree LFR-20260105123456'
+      refute File.exist?(archive_path), 'the per-run archive must be removed after the command'
+    end
+  end
+
+  def test_deleted_published_program_is_not_kept_in_the_next_run_archive
+    Dir.mktmpdir do |dir|
+      published = File.join(dir, '番組 [LFR-20260102123456].m4a')
+      File.write(published, 'audio')
+      archive_snapshots = []
+      downloader = build_downloader(
+        config: default_config.merge('audio_dir' => dir),
+        command_runner: lambda do |*args|
+          archive_snapshots << File.readlines(option_value(args, '--download-archive'), chomp: true)
+          true
+        end
+      )
+
+      assert downloader.download
+      File.delete(published)
+      assert downloader.download
+      assert_includes archive_snapshots.first, 'radikotimefree LFR-20260102123456'
+      refute_includes archive_snapshots.last, 'radikotimefree LFR-20260102123456'
+    end
+  end
+
+  def test_failed_program_stays_staged_and_can_be_retried_without_reprocessing_success
+    Dir.mktmpdir do |dir|
+      failed_name = '失敗番組 [LFR-20260102123456].m4a'
+      success_name = '成功番組 [TBS-20260103123456].m4a'
+      failed_id = 'radikotimefree LFR-20260102123456'
+      success_id = 'radikotimefree TBS-20260103123456'
+      invocations = []
+      archive_paths = []
+      run_number = 0
+
+      # Simulate yt-dlp's download/postprocess/move lifecycle, failing the first
+      # program's postprocessing once while the second program succeeds.
+      runner = lambda do |*args|
+        run_number += 1
+        archive_path = option_value(args, '--download-archive')
+        archive_paths << archive_path
+        archive = File.readlines(archive_path, chomp: true)
+        home = option_values(args, '-P').find { |value| value.start_with?('home:') }.delete_prefix('home:')
+        temp = option_values(args, '-P').find { |value| value.start_with?('temp:') }.delete_prefix('temp:')
+        invocations << archive
+        unless archive.include?(failed_id)
+          staged = File.join(temp, failed_name)
+          File.write(staged, 'downloaded audio') unless File.exist?(staged)
+          File.rename(staged, File.join(home, failed_name)) if run_number > 1
+        end
+        unless archive.include?(success_id)
+          staged = File.join(temp, success_name)
+          File.write(staged, 'complete audio')
+          File.rename(staged, File.join(home, success_name))
+          File.open(archive_path, 'a') { |file| file.puts success_id }
+        end
+        run_number > 1
+      end
+      downloader = build_downloader(config: default_config.merge('audio_dir' => dir), command_runner: runner)
+
+      refute downloader.download
+      refute File.exist?(archive_paths.last)
+      assert File.exist?(File.join(dir, '.podcast-downloads', failed_name))
+      refute File.exist?(File.join(dir, failed_name))
+      assert File.exist?(File.join(dir, success_name))
+      assert downloader.download
+      assert File.exist?(File.join(dir, failed_name))
+      assert_includes invocations.last, success_id
+      refute_includes invocations.last, failed_id
+    end
+  end
+
+  def test_overlapping_keywords_share_archive_until_run_finishes
+    Dir.mktmpdir do |dir|
+      paths = []
+      seen = []
+      id = 'radikotimefree LFR-20260102123456'
+      downloader = build_downloader(
+        config: default_config.merge('audio_dir' => dir),
+        keywords: %w[first second],
+        command_runner: lambda do |*args|
+          path = option_value(args, '--download-archive')
+          paths << path
+          entries = File.readlines(path, chomp: true)
+          seen << entries.include?(id)
+          File.open(path, 'a') { |file| file.puts id } unless entries.include?(id)
+          true
+        end
+      )
+
+      assert downloader.download
+      assert_equal [false, true], seen
+      assert_equal paths.first, paths.last
+      refute File.exist?(paths.first)
+    end
+  end
+
+  def test_download_fails_cleanly_when_work_directory_cannot_be_created
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, '.podcast-downloads'), 'not a directory')
+      stderr = StringIO.new
+      downloader = build_downloader(
+        config: default_config.merge('audio_dir' => dir),
+        stderr: stderr,
+        command_runner: ->(*_args) { flunk 'yt-dlp must not run without a working directory' }
+      )
+
+      refute downloader.download
+      assert_match(/準備/, stderr.string)
+    end
+  end
+
+  def test_download_rejects_overlapping_runs_without_invoking_yt_dlp
+    Dir.mktmpdir do |dir|
+      work_dir = File.join(dir, '.podcast-downloads')
+      Dir.mkdir(work_dir)
+      File.open(File.join(work_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
+        assert lock.flock(File::LOCK_EX | File::LOCK_NB)
+        stderr = StringIO.new
+        downloader = build_downloader(
+          config: default_config.merge('audio_dir' => dir),
+          stderr: stderr,
+          command_runner: ->(*_args) { flunk 'yt-dlp must not run while another download holds the lock' }
+        )
+
+        refute downloader.download
+        assert_match(/実行中/, stderr.string)
+      end
+    end
+  end
+
   def test_build_base_options_uses_default_concurrent_fragments
     options = @downloader.send(:build_base_options)
-    assert_equal '5', option_value(options, '-N')
+    assert_equal '1', option_value(options, '-N')
   end
 
   def test_build_base_options_uses_custom_concurrent_fragments
@@ -240,18 +407,22 @@ class PodcastDownloaderTest < Minitest::Test
   end
 
   def test_initialize_normalizes_surrounding_whitespace_in_paths_and_area
-    downloader = build_downloader(
-      config: default_config.merge(
-        'area_id' => ' JP13 ',
-        'audio_dir' => ' /tmp/audio ',
-        'yt_dlp_path' => ' /usr/local/bin/yt-dlp '
+    Dir.mktmpdir do |dir|
+      command = nil
+      downloader = build_downloader(
+        config: default_config.merge(
+          'area_id' => ' JP13 ',
+          'audio_dir' => " #{dir} ",
+          'yt_dlp_path' => ' /usr/local/bin/yt-dlp '
+        ),
+        command_runner: ->(*args) { command = args; true }
       )
-    )
 
-    command = downloader.send(:build_command, 'https://example.com', downloader.send(:build_base_options))
-    assert_equal '/usr/local/bin/yt-dlp', command.first
-    assert_equal '/tmp/audio', option_value(command, '-P')
-    assert_includes downloader.send(:build_search_url, 'show', nil), 'area_id=JP13'
+      assert downloader.download
+      assert_equal '/usr/local/bin/yt-dlp', command.first
+      assert_includes option_values(command, '-P'), "home:#{dir}"
+      assert_includes downloader.send(:build_search_url, 'show', nil), 'area_id=JP13'
+    end
   end
 
   def test_cli_run_returns_zero_and_reports_completion_on_success
@@ -618,10 +789,14 @@ class PodcastDownloaderTest < Minitest::Test
     options.fetch(options.index(option) + 1)
   end
 
+  def option_values(options, option)
+    options.each_index.filter_map { |index| options[index + 1] if options[index] == option }
+  end
+
   def default_config
     {
       'area_id' => 'JP13',
-      'audio_dir' => '/tmp/audio',
+      'audio_dir' => File.join(@test_dir, 'audio'),
       'yt_dlp_path' => '/usr/local/bin/yt-dlp'
     }
   end

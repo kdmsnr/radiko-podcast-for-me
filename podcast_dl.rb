@@ -3,15 +3,19 @@
 require 'shellwords'
 require 'uri'
 require 'open3'
+require 'fileutils'
+require 'tempfile'
 require_relative 'lib/common'
 
 class PodcastDownloader
   class ConfigurationError < ArgumentError; end
 
-  DEFAULT_CONCURRENT_FRAGMENTS = 5
+  DEFAULT_CONCURRENT_FRAGMENTS = 1
   REQUIRED_CONFIG_KEYS = %w[area_id audio_dir yt_dlp_path].freeze
   MAX_DIAGNOSTIC_LINES = 10
   MAX_LOG_LINE_BYTES = 4096
+  WORK_DIR_NAME = '.podcast-downloads'
+  PUBLISHED_PROGRAM_PATTERN = /\[([a-z0-9_-]+-\d{14})\]\.(?:mp3|m4a)\z/i
   UNAVAILABLE_PROGRAM_ERROR = /\AERROR: \[RadikoTimeFree\] [\w-]+-\d{14}: (?:This programme is not available\.(?: If this is an NHK station, you may wish to try NHK Radiru\.)?|Programme is no longer available\.)\z/
 
   attr_reader :failures
@@ -35,9 +39,44 @@ class PodcastDownloader
   end
 
   def download
-    base_options = build_base_options
     @failures = []
+    FileUtils.mkdir_p(@audio_dir)
+    work_dir = File.join(@audio_dir, WORK_DIR_NAME)
+    FileUtils.mkdir_p(work_dir, mode: 0o700)
 
+    File.open(File.join(work_dir, 'download.lock'), File::RDWR | File::CREAT, 0o600) do |lock|
+      unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+        return download_setup_failed('別のダウンロード処理が実行中です。')
+      end
+
+      Tempfile.create(['download-archive-', '.txt'], work_dir) do |archive|
+        published_program_ids.each { |id| archive.puts "radikotimefree #{id}" }
+        archive.flush
+        download_keywords(build_base_options(work_dir: work_dir, archive_path: archive.path))
+      end
+    end
+  rescue SystemCallError, IOError => e
+    download_setup_failed("作業ディレクトリまたは処理済み一覧を準備できません: #{e.message}")
+  end
+
+  private
+
+  def download_setup_failed(message)
+    @stderr.puts "エラー: #{message}"
+    @failures << { keyword: '(準備処理)', message: message, details: [] }
+    false
+  end
+
+  def published_program_ids
+    Dir.each_child(@audio_dir).filter_map do |name|
+      match = PUBLISHED_PROGRAM_PATTERN.match(name)
+      next unless match && File.file?(File.join(@audio_dir, name))
+
+      match[1]
+    end.uniq
+  end
+
+  def download_keywords(base_options)
     @keywords.each do |keyword_str|
       @stdout.puts "検索キーワード: #{keyword_str}"
       search_key, station_id = parse_keyword(keyword_str)
@@ -55,8 +94,6 @@ class PodcastDownloader
 
     @failures.empty?
   end
-
-  private
 
   def validate_config(config)
     unless config.is_a?(Hash)
@@ -127,16 +164,22 @@ class PodcastDownloader
     raise ConfigurationError, "'#{key}' は正の整数で指定してください（現在値: #{value.inspect}）。"
   end
 
-  def build_base_options
-    [
+  def build_base_options(work_dir: File.join(@audio_dir, WORK_DIR_NAME), archive_path: nil)
+    options = [
       '-x',
       '-N', @concurrent_fragments.to_s,
       '--embed-metadata',
+      '--abort-on-unavailable-fragments',
+      '--no-overwrites',
       '--playlist-reverse',
       '--no-abort-on-error',
       '--newline',
-      '-P', @audio_dir,
+      '-P', "home:#{@audio_dir}",
+      '-P', "temp:#{work_dir}",
+      '-o', '%(title)s [%(id)s].%(ext)s',
     ]
+    options.concat(['--download-archive', archive_path]) if archive_path
+    options
   end
 
   def parse_keyword(keyword_str)
